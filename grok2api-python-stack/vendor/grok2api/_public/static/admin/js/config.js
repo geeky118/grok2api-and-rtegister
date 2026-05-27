@@ -16,6 +16,11 @@ const NUMERIC_FIELDS = new Set([
   'usage_flush_interval_sec',
   'on_demand_refresh_min_interval_sec',
   'on_demand_refresh_max_tokens',
+  'min_available_accounts',
+  'check_interval_seconds',
+  'task_count',
+  'trigger_cooldown_seconds',
+  'request_timeout_seconds',
   'upload_concurrent',
   'upload_timeout',
   'download_concurrent',
@@ -161,6 +166,20 @@ const LOCALE_MAP = {
     "on_demand_refresh_min_interval_sec": { title: "按需刷新最小间隔", desc: "请求侧按需刷新之间的最小间隔（秒），用于避免刷新风暴。" },
     "on_demand_refresh_max_tokens": { title: "按需刷新最大数量", desc: "单次请求侧按需刷新最多检查多少个 cooling Token。" },
     "consumed_mode_enabled": { title: "启用消耗模式", desc: "启用新额度管理逻辑：使用本地消耗记录而非 API 返回值，支持更均衡的负载分配。（试验性功能，默认关闭）" }
+  },
+
+  "grok_register": {
+    "label": "grok-register 调度",
+    "enabled": { title: "启用自动注册", desc: "可用账号低于阈值时，自动调用 grok-register 创建注册任务。" },
+    "task_api_url": { title: "注册任务接口", desc: "grok-register 的创建任务接口地址，例如 http://127.0.0.1:18600/api/tasks。" },
+    "min_available_accounts": { title: "账号阈值", desc: "当前可用账号数量低于该值时触发自动注册。" },
+    "check_interval_seconds": { title: "检查间隔", desc: "检查可用账号数量的间隔时间（秒）。" },
+    "task_count": { title: "任务执行次数", desc: "每次自动创建注册任务时传给 grok-register 的 count 值。" },
+    "trigger_cooldown_seconds": { title: "触发冷却", desc: "成功创建任务后，下一次允许自动创建任务前需要等待的秒数。" },
+    "request_timeout_seconds": { title: "接口超时", desc: "调用 grok-register 接口的超时时间（秒）。" },
+    "pool_names": { title: "统计池", desc: "参与可用账号统计的 Token 池列表。" },
+    "skip_if_active_task": { title: "跳过活跃任务", desc: "grok-register 已有排队或运行中的任务时，不再重复创建自动任务。" },
+    "task_name_prefix": { title: "任务名前缀", desc: "自动创建注册任务时使用的名称前缀。" }
   },
 
   "log": {

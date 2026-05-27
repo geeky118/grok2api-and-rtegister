@@ -864,6 +864,20 @@ class TokenManager:
             stats[name] = pool_stats.model_dump()
         return stats
 
+    def count_available_tokens(self, pool_names: Optional[List[str]] = None) -> int:
+        """Count currently selectable tokens across the requested pools."""
+        consumed_mode = self._is_consumed_mode()
+        selected_pool_names = pool_names or list(self.pools.keys())
+        count = 0
+        for pool_name in selected_pool_names:
+            pool = self.pools.get(pool_name)
+            if not pool:
+                continue
+            count += sum(
+                1 for token in pool if token.is_available(consumed_mode=consumed_mode)
+            )
+        return count
+
     def get_pool_tokens(self, pool_name: str = "ssoBasic") -> List[TokenInfo]:
         """
         获取指定池的所有 Token

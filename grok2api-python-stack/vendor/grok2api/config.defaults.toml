@@ -99,6 +99,29 @@ on_demand_refresh_max_tokens = 100
 # 启用消耗模式（试验性功能，默认关闭）
 consumed_mode_enabled = false
 
+# ==================== grok-register 调度 ====================
+[grok_register]
+# 是否启用低账号数自动注册调度
+enabled = false
+# grok-register 创建任务接口地址（例如 http://127.0.0.1:18600/api/tasks）
+task_api_url = ""
+# 可用账号低于该阈值时触发注册任务
+min_available_accounts = 500
+# 检查间隔（秒）
+check_interval_seconds = 300
+# 每次自动创建注册任务的执行次数
+task_count = 100
+# 成功创建任务后的触发冷却时间（秒）
+trigger_cooldown_seconds = 3600
+# 调用 grok-register 接口超时时间（秒）
+request_timeout_seconds = 15
+# 计入可用账号数量的 Token 池
+pool_names = ["ssoBasic","ssoSuper"]
+# grok-register 已有 queued/running/stopping 任务时不重复创建
+skip_if_active_task = true
+# 自动任务名称前缀
+task_name_prefix = "grok2api-auto-register"
+
 # ==================== 日志配置 ====================
 [log]
 # 单个日志文件大小上限（MB），<=0 表示不按大小轮转

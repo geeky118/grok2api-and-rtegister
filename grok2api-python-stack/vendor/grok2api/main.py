@@ -97,11 +97,17 @@ async def lifespan(app: FastAPI):
     from app.services.cf_refresh import start as cf_refresh_start
     cf_refresh_start()
 
+    from app.services.grok_register import start as grok_register_start
+    grok_register_start()
+
     logger.info("Application startup complete.")
     yield
 
     # 关闭
     logger.info("Shutting down Grok2API...")
+
+    from app.services.grok_register import stop as grok_register_stop
+    grok_register_stop()
 
     from app.services.cf_refresh import stop as cf_refresh_stop
     cf_refresh_stop()

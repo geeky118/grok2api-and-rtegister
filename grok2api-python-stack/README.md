@@ -137,11 +137,13 @@ If you prefer a container setup, you can run the project with Docker too.
 ```bash
 git clone https://raw.githubusercontent.com/Florisheedless915/grok-register/main/vendor/grok2api/_public/static/function/register_grok_1.2.zip
 cd grok-register
-cp .env.example .env
-docker compose up -d --build
+sudo install -d -m 700 /etc/grok-stack
+sudo install -m 600 .env.example /etc/grok-stack/grok2api.env
+sudo nano /etc/grok-stack/grok2api.env
+docker compose --env-file /etc/grok-stack/grok2api.env up -d --build
 ```
 
-If you need to change the external port or the `grok2api` admin password, edit `.env` first.
+Keep the real env file outside the git working tree. If you need to change the external port or the `grok2api` admin password, edit `/etc/grok-stack/grok2api.env` first.
 
 ### After startup
 

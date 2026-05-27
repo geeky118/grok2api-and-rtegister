@@ -52,9 +52,13 @@ sudo DEBIAN_FRONTEND=noninteractive apt-get install -y xvfb chromium-browser
 ```bash
 git clone https://github.com/509992828/grok-register.git
 cd grok-register
-cp .env.example .env
-docker compose up -d --build
+sudo install -d -m 700 /etc/grok-stack
+sudo install -m 600 .env.example /etc/grok-stack/grok2api.env
+sudo nano /etc/grok-stack/grok2api.env
+docker compose --env-file /etc/grok-stack/grok2api.env up -d --build
 ```
+
+不要把真实 `.env` 放在仓库目录里；生产配置建议放到 `/etc/grok-stack/grok2api.env` 这类仓库外部路径。
 
 默认端口：
 

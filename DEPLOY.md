@@ -1,20 +1,20 @@
-# 部署文档 — GCP 新加坡服务器
+# 部署文档
 
 ## 服务器信息
 
-- **IP**: 34.87.1.6
-- **用户**: f1079132971
-- **SSH 密钥**: `C:/Users/10791/.ssh/google_compute_engine`
+- **IP**: `<SERVER_IP>`
+- **用户**: `<SSH_USER>`
+- **SSH 密钥**: `<SSH_KEY_PATH>`
 - **SSH 命令**:
   ```bash
-  ssh -i "C:/Users/10791/.ssh/google_compute_engine" f1079132971@34.87.1.6
+  ssh -i "<SSH_KEY_PATH>" <SSH_USER>@<SERVER_IP>
   ```
 
 ## 服务架构
 
 ```
 ┌─────────────────────────────────────────────────┐
-│  GCP Singapore (34.87.1.6)                      │
+│  Deployment host                                │
 │                                                  │
 │  ~/grok-stack/                                   │
 │  ├── docker-compose.yml                          │
@@ -51,8 +51,8 @@
 
 | 名称 | 值 |
 |------|------|
-| app_key (管理面板) | `321wssba` |
-| api_key (API 调用) | `sk-yX71tcBuaUq2S5oXBFDwjrWZXYiTUEV1` |
+| app_key (管理面板) | `<APP_KEY>` |
+| api_key (API 调用) | `<API_KEY>` |
 
 ## Docker 容器
 
@@ -82,8 +82,8 @@
 
 **API 调用**:
 ```bash
-curl -X POST http://34.87.1.6:18089/v1/images/generations \
-  -H "Authorization: Bearer sk-yX71tcBuaUq2S5oXBFDwjrWZXYiTUEV1" \
+curl -X POST http://<SERVER_IP>:18089/v1/images/generations \
+  -H "Authorization: Bearer <API_KEY>" \
   -H "Content-Type: application/json" \
   -d '{"model":"grok-imagine-1.0","prompt":"a cat","n":1,"size":"720x1280","response_format":"b64_json"}'
 ```
@@ -107,7 +107,7 @@ curl -X POST http://34.87.1.6:18089/v1/images/generations \
 
 ### 3. Cloud Mail 邮箱集成 (2026-05-17)
 
-**背景**: grok-register 原生不支持 Cloud Mail (cloudflare_temp_email)，用户有自定义域名 `haojiangzhenhao.com` catch-all 邮箱
+**背景**: grok-register 原生不支持 Cloud Mail (cloudflare_temp_email)，需要通过自定义 catch-all 域名接收验证码。
 
 **修改文件**:
 
@@ -126,10 +126,10 @@ curl -X POST http://34.87.1.6:18089/v1/images/generations \
 4. **docker-compose.yml** — console 服务环境变量
    ```yaml
    GROK_REGISTER_DEFAULT_TEMP_MAIL_PROVIDER: cloudmail
-   GROK_REGISTER_DEFAULT_CLOUDMAIL_ADMIN_EMAIL: admin@haojiangzhenhao.com
-   GROK_REGISTER_DEFAULT_TEMP_MAIL_API_BASE: https://haojiangzhenhao.com
-   GROK_REGISTER_DEFAULT_TEMP_MAIL_ADMIN_PASSWORD: 321wssba
-   GROK_REGISTER_DEFAULT_TEMP_MAIL_DOMAIN: haojiangzhenhao.com
+   GROK_REGISTER_DEFAULT_CLOUDMAIL_ADMIN_EMAIL: <CLOUDMAIL_ADMIN_EMAIL>
+   GROK_REGISTER_DEFAULT_TEMP_MAIL_API_BASE: <TEMP_MAIL_API_BASE>
+   GROK_REGISTER_DEFAULT_TEMP_MAIL_ADMIN_PASSWORD: <TEMP_MAIL_ADMIN_PASSWORD>
+   GROK_REGISTER_DEFAULT_TEMP_MAIL_DOMAIN: <TEMP_MAIL_DOMAIN>
    ```
 
 ### 4. Turnstile 反检测 + 僵尸进程修复 (2026-05-19 ~ 2026-05-21)
@@ -193,18 +193,18 @@ console:
 
 **测试结果**:
 - Task 17: 43 成功 / 4 失败 / 47 轮，成功率 ~91%
-- Task 40: 23 成功 / 2 失败（`haojiangzhenhao.com.cn` 域名，定期重启前）
+- Task 40: 23 成功 / 2 失败（切换新域名后，定期重启前）
 
 ### 5. x.ai 域名封禁 (2026-05-21)
 
-**问题**: x.ai 封禁了 `haojiangzhenhao.com` 域名，提交邮箱后返回"您的邮箱域名已被拒绝"
+**问题**: x.ai 封禁了注册邮箱域名，提交邮箱后返回"您的邮箱域名已被拒绝"
 
 **表现**: 脚本打印"已填写邮箱并点击注册"后继续轮询验证码，永远收不到（0 封邮件）
 
 **修复**:
 - `fill_email_and_submit` 添加域名拒绝错误检测，点击注册后等待 2 秒检查页面错误信息
-- 切换到 `haojiangzhenhao.com.cn` 域名（当前可用）
-- `docker-compose.yml` 中 `TEMP_MAIL_DOMAIN` 改为 `haojiangzhenhao.com.cn`
+- 切换到新的可用邮箱域名
+- `docker-compose.yml` 中 `TEMP_MAIL_DOMAIN` 改为新的可用邮箱域名
 
 **检测关键词**: `已被拒绝` / `has been rejected` / `blocked` / `not allowed`
 
