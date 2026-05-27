@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+logs/
+sso/
+chrome_data/
+apps/console/runtime/
+apps/console/.venv/
+runtime/
+config.json
+config.json.bak-*
+node_modules/
+.idea/
+CLAUDE.md

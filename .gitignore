@@ -1,0 +1,50 @@
+# Rust build artifacts
+/target/
+
+# Runtime data
+data/
+runtime/
+**/runtime/
+logs/
+**/logs/
+sso/
+**/sso/
+chrome_data/
+**/chrome_data/
+config.json
+**/config.json
+
+# Build logs
+*.log
+
+# Python
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.pyo
+
+# Local backups
+*.bak
+*.bak-*
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test artifacts
+*.jpg
+*.png
+
+# Claude Code
+.claude/

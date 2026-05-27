@@ -1,0 +1,29 @@
+services:
+  warp:
+    extends:
+      file: ../docker-compose.yml
+      service: warp
+    restart: unless-stopped
+
+  grok2api:
+    extends:
+      file: ../docker-compose.yml
+      service: grok2api
+    restart: unless-stopped
+
+  console:
+    extends:
+      file: ../docker-compose.yml
+      service: console
+    restart: unless-stopped
+
+  worker-runtime:
+    build:
+      context: ..
+      dockerfile: apps/worker-runtime/Dockerfile
+    command: bash
+    working_dir: /workspace
+    volumes:
+      - ..:/workspace
+    profiles:
+      - tools

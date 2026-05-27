@@ -1,0 +1,1728 @@
+let apiKey = '';
+let currentScope = 'none';
+let currentToken = '';
+let currentSection = 'image';
+const accountMap = new Map();
+const selectedTokens = new Set();
+const selectedLocal = {
+  image: new Set(),
+  video: new Set()
+};
+const LOCAL_PAGE_SIZE_OPTIONS = [50, 100, 200, 500];
+const LOCAL_PAGE_SIZE_DEFAULT = 100;
+const ui = {};
+const byId = (id) => document.getElementById(id);
+const loadFailed = new Map();
+const deleteFailed = new Map();
+let currentBatchAction = null;
+let lastBatchAction = null;
+let isLocalDeleting = false;
+const cacheListState = {
+  image: {
+    loaded: false,
+    visible: false,
+    items: [],
+    total: 0,
+    page: 1,
+    pageSize: LOCAL_PAGE_SIZE_DEFAULT,
+    loading: false
+  },
+  video: {
+    loaded: false,
+    visible: false,
+    items: [],
+    total: 0,
+    page: 1,
+    pageSize: LOCAL_PAGE_SIZE_DEFAULT,
+    loading: false
+  }
+};
+const UI_MAP = {
+  imgCount: 'img-count',
+  imgSize: 'img-size',
+  videoCount: 'video-count',
+  videoSize: 'video-size',
+  onlineCount: 'online-count',
+  onlineStatus: 'online-status',
+  onlineLastClear: 'online-last-clear',
+  accountTableBody: 'account-table-body',
+  accountEmpty: 'account-empty',
+  selectAll: 'select-all',
+  selectedCount: 'selected-count',
+  batchActions: 'batch-actions',
+  loadBtn: 'btn-load-stats',
+  deleteBtn: 'btn-delete-assets',
+  localCacheLists: 'local-cache-lists',
+  localImageList: 'local-image-list',
+  localVideoList: 'local-video-list',
+  localImageBody: 'local-image-body',
+  localVideoBody: 'local-video-body',
+  localImagePrev: 'local-image-prev',
+  localImageNext: 'local-image-next',
+  localImagePageInfo: 'local-image-page-info',
+  localImagePageSize: 'local-image-page-size',
+  localImageSelectWrap: 'local-image-select-wrap',
+  localImageSelectTrigger: 'local-image-select-trigger',
+  localImageSelectLabel: 'local-image-select-label',
+  localImageSelectCaret: 'local-image-select-caret',
+  localImageSelectPopover: 'local-image-select-popover',
+  localImageSelectPage: 'local-image-select-page',
+  localImageSelectAllBtn: 'local-image-select-all',
+  localVideoPrev: 'local-video-prev',
+  localVideoNext: 'local-video-next',
+  localVideoPageInfo: 'local-video-page-info',
+  localVideoPageSize: 'local-video-page-size',
+  localVideoSelectWrap: 'local-video-select-wrap',
+  localVideoSelectTrigger: 'local-video-select-trigger',
+  localVideoSelectLabel: 'local-video-select-label',
+  localVideoSelectCaret: 'local-video-select-caret',
+  localVideoSelectPopover: 'local-video-select-popover',
+  localVideoSelectPage: 'local-video-select-page',
+  localVideoSelectAllBtn: 'local-video-select-all',
+  onlineAssetsTable: 'online-assets-table',
+  batchProgress: 'batch-progress',
+  batchProgressText: 'batch-progress-text',
+  pauseActionBtn: 'btn-pause-action',
+  stopActionBtn: 'btn-stop-action',
+  failureDetailsBtn: 'btn-failure-details',
+  confirmDialog: 'confirm-dialog',
+  confirmMessage: 'confirm-message',
+  confirmOk: 'confirm-ok',
+  confirmCancel: 'confirm-cancel',
+  failureDialog: 'failure-dialog',
+  failureList: 'failure-list',
+  failureClose: 'failure-close',
+  failureRetry: 'failure-retry'
+};
+
+function setText(el, text) {
+  if (el) el.textContent = text;
+}
+
+function resolveOnlineStatus(status) {
+  if (status === 'ok') {
+    return { text: t('common.connected'), className: 'text-xs text-green-600 mt-1' };
+  }
+  if (status === 'no_token') {
+    return { text: t('cache.noTokenAvailable'), className: 'text-xs text-orange-500 mt-1' };
+  }
+  if (status === 'not_loaded') {
+    return { text: t('cache.notLoaded'), className: 'text-xs text-[var(--accents-4)] mt-1' };
+  }
+  return { text: t('cache.cannotConnect'), className: 'text-xs text-red-500 mt-1' };
+}
+
+function createIconButton(title, svg, onClick) {
+  const btn = document.createElement('button');
+  btn.className = 'cache-icon-button';
+  btn.title = title;
+  btn.innerHTML = svg;
+  btn.addEventListener('click', onClick);
+  return btn;
+}
+
+async function init() {
+  apiKey = await ensureAdminKey();
+  if (apiKey === null) return;
+  cacheUI();
+  setupLocalPaginationControls();
+  setupCacheCards();
+  setupConfirmDialog();
+  setupFailureDialog();
+  setupBatchControls();
+  await loadStats();
+  await showCacheSection('image');
+}
+
+function setupCacheCards() {
+  if (!ui.cacheCards) return;
+  ui.cacheCards.forEach(card => {
+    card.addEventListener('click', () => {
+      const type = card.getAttribute('data-type');
+      if (type) toggleCacheList(type);
+    });
+  });
+}
+
+function cacheUI() {
+  Object.entries(UI_MAP).forEach(([key, id]) => {
+    ui[key] = byId(id);
+  });
+  ui.cacheCards = document.querySelectorAll('.cache-card');
+}
+
+function getLocalState(type) {
+  return cacheListState[type] || null;
+}
+
+function getLocalPaginationRefs(type) {
+  if (type === 'image') {
+    return {
+      prev: ui.localImagePrev,
+      next: ui.localImageNext,
+      info: ui.localImagePageInfo,
+      size: ui.localImagePageSize,
+      wrap: ui.localImageSelectWrap,
+      trigger: ui.localImageSelectTrigger,
+      label: ui.localImageSelectLabel,
+      caret: ui.localImageSelectCaret,
+      popover: ui.localImageSelectPopover,
+      selectPage: ui.localImageSelectPage,
+      selectAll: ui.localImageSelectAllBtn
+    };
+  }
+  return {
+    prev: ui.localVideoPrev,
+    next: ui.localVideoNext,
+    info: ui.localVideoPageInfo,
+    size: ui.localVideoPageSize,
+    wrap: ui.localVideoSelectWrap,
+    trigger: ui.localVideoSelectTrigger,
+    label: ui.localVideoSelectLabel,
+    caret: ui.localVideoSelectCaret,
+    popover: ui.localVideoSelectPopover,
+    selectPage: ui.localVideoSelectPage,
+    selectAll: ui.localVideoSelectAllBtn
+  };
+}
+
+function setupPageSizeOptions(select, selectedValue) {
+  if (!select) return;
+  const value = Number(selectedValue) || LOCAL_PAGE_SIZE_DEFAULT;
+  select.innerHTML = '';
+  LOCAL_PAGE_SIZE_OPTIONS.forEach(size => {
+    const option = document.createElement('option');
+    option.value = String(size);
+    option.textContent = t('cache.perPage', { size });
+    option.selected = size === value;
+    select.appendChild(option);
+  });
+}
+
+function updateLocalPaginationUI(type) {
+  const state = getLocalState(type);
+  if (!state) return;
+  const refs = getLocalPaginationRefs(type);
+  const total = Math.max(0, Number(state.total) || 0);
+  const pageSize = Math.max(1, Number(state.pageSize) || LOCAL_PAGE_SIZE_DEFAULT);
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const page = Math.min(Math.max(1, Number(state.page) || 1), totalPages);
+  state.page = page;
+  state.pageSize = pageSize;
+
+  if (refs.info) {
+    refs.info.textContent = t('cache.pagination', {
+      current: page,
+      total: totalPages,
+      count: total
+    });
+  }
+
+  if (refs.prev) refs.prev.disabled = state.loading || page <= 1;
+  if (refs.next) refs.next.disabled = state.loading || page >= totalPages;
+  if (refs.size && String(refs.size.value) !== String(pageSize)) {
+    setupPageSizeOptions(refs.size, pageSize);
+  }
+}
+
+function closeLocalSelectMenu(type) {
+  const refs = getLocalPaginationRefs(type);
+  if (refs.popover) refs.popover.classList.add('hidden');
+}
+
+function closeAllLocalSelectMenus() {
+  closeLocalSelectMenu('image');
+  closeLocalSelectMenu('video');
+}
+
+function isLocalSelectMenuOpen(type) {
+  const refs = getLocalPaginationRefs(type);
+  return !!(refs.popover && !refs.popover.classList.contains('hidden'));
+}
+
+function refreshLocalSelectControl(type) {
+  const refs = getLocalPaginationRefs(type);
+  const selectedCount = selectedLocal[type]?.size || 0;
+  if (refs.label) {
+    refs.label.textContent = selectedCount > 0
+      ? t('cache.clearSelection')
+      : t('common.selectAll');
+  }
+  if (refs.trigger) {
+    refs.trigger.classList.toggle('is-active', selectedCount > 0);
+  }
+  if (refs.caret) {
+    refs.caret.style.display = selectedCount > 0 ? 'none' : 'inline';
+  }
+}
+
+function selectLocalPage(type) {
+  const set = selectedLocal[type];
+  if (!set) return;
+  const items = cacheListState[type]?.items || [];
+  items.forEach(item => {
+    if (item && item.name) set.add(item.name);
+  });
+  syncLocalRowCheckboxes(type);
+  updateSelectedCount();
+  closeLocalSelectMenu(type);
+}
+
+async function fetchAllLocalNames(type) {
+  const names = [];
+  let page = 1;
+  const pageSize = 1000;
+  let total = 0;
+
+  while (true) {
+    const params = new URLSearchParams({
+      type,
+      page: String(page),
+      page_size: String(pageSize)
+    });
+    const res = await fetch(`/v1/admin/cache/list?${params.toString()}`, {
+      headers: buildAuthHeaders(apiKey)
+    });
+    if (!res.ok) {
+      throw new Error(t('common.loadFailed'));
+    }
+    const data = await res.json();
+    const items = Array.isArray(data.items) ? data.items : [];
+    total = Math.max(total, Number(data.total) || 0);
+    items.forEach(item => {
+      if (item && item.name) names.push(item.name);
+    });
+    if (names.length >= total || items.length < pageSize) break;
+    page += 1;
+  }
+  return names;
+}
+
+async function selectLocalAll(type) {
+  try {
+    const names = await fetchAllLocalNames(type);
+    const set = selectedLocal[type];
+    if (!set) return;
+    set.clear();
+    names.forEach(name => set.add(name));
+    syncLocalRowCheckboxes(type);
+    updateSelectedCount();
+  } catch (e) {
+    showToast(t('common.requestFailed'), 'error');
+  } finally {
+    closeLocalSelectMenu(type);
+  }
+}
+
+function clearLocalSelection(type) {
+  const set = selectedLocal[type];
+  if (!set) return;
+  if (set.size === 0) {
+    closeLocalSelectMenu(type);
+    return;
+  }
+  set.clear();
+  syncLocalRowCheckboxes(type);
+  updateSelectedCount();
+  closeLocalSelectMenu(type);
+}
+
+function setupLocalPaginationControls() {
+  const imageState = getLocalState('image');
+  const videoState = getLocalState('video');
+  setupPageSizeOptions(ui.localImagePageSize, imageState?.pageSize);
+  setupPageSizeOptions(ui.localVideoPageSize, videoState?.pageSize);
+
+  if (ui.localImagePrev) {
+    ui.localImagePrev.addEventListener('click', () => {
+      const state = getLocalState('image');
+      if (!state || state.loading) return;
+      if (state.page <= 1) return;
+      closeAllLocalSelectMenus();
+      loadLocalCacheList('image', { page: state.page - 1 });
+    });
+  }
+  if (ui.localImageNext) {
+    ui.localImageNext.addEventListener('click', () => {
+      const state = getLocalState('image');
+      if (!state || state.loading) return;
+      const totalPages = Math.max(1, Math.ceil((state.total || 0) / state.pageSize));
+      if (state.page >= totalPages) return;
+      closeAllLocalSelectMenus();
+      loadLocalCacheList('image', { page: state.page + 1 });
+    });
+  }
+  if (ui.localVideoPrev) {
+    ui.localVideoPrev.addEventListener('click', () => {
+      const state = getLocalState('video');
+      if (!state || state.loading) return;
+      if (state.page <= 1) return;
+      closeAllLocalSelectMenus();
+      loadLocalCacheList('video', { page: state.page - 1 });
+    });
+  }
+  if (ui.localVideoNext) {
+    ui.localVideoNext.addEventListener('click', () => {
+      const state = getLocalState('video');
+      if (!state || state.loading) return;
+      const totalPages = Math.max(1, Math.ceil((state.total || 0) / state.pageSize));
+      if (state.page >= totalPages) return;
+      closeAllLocalSelectMenus();
+      loadLocalCacheList('video', { page: state.page + 1 });
+    });
+  }
+
+  if (ui.localImagePageSize) {
+    ui.localImagePageSize.addEventListener('change', (event) => {
+      const state = getLocalState('image');
+      if (!state) return;
+      const size = parseInt(event.target.value, 10);
+      if (!Number.isFinite(size) || size <= 0) return;
+      state.pageSize = size;
+      state.page = 1;
+      closeAllLocalSelectMenus();
+      loadLocalCacheList('image', { page: 1, pageSize: size });
+    });
+  }
+  if (ui.localVideoPageSize) {
+    ui.localVideoPageSize.addEventListener('change', (event) => {
+      const state = getLocalState('video');
+      if (!state) return;
+      const size = parseInt(event.target.value, 10);
+      if (!Number.isFinite(size) || size <= 0) return;
+      state.pageSize = size;
+      state.page = 1;
+      closeAllLocalSelectMenus();
+      loadLocalCacheList('video', { page: 1, pageSize: size });
+    });
+  }
+
+  if (ui.localImageSelectTrigger) {
+    ui.localImageSelectTrigger.addEventListener('click', (event) => {
+      event.stopPropagation();
+      if ((selectedLocal.image?.size || 0) > 0) {
+        clearLocalSelection('image');
+        return;
+      }
+      if (isLocalSelectMenuOpen('image')) closeLocalSelectMenu('image');
+      else {
+        closeLocalSelectMenu('video');
+        const refs = getLocalPaginationRefs('image');
+        if (refs.popover) refs.popover.classList.remove('hidden');
+      }
+    });
+  }
+  if (ui.localVideoSelectTrigger) {
+    ui.localVideoSelectTrigger.addEventListener('click', (event) => {
+      event.stopPropagation();
+      if ((selectedLocal.video?.size || 0) > 0) {
+        clearLocalSelection('video');
+        return;
+      }
+      if (isLocalSelectMenuOpen('video')) closeLocalSelectMenu('video');
+      else {
+        closeLocalSelectMenu('image');
+        const refs = getLocalPaginationRefs('video');
+        if (refs.popover) refs.popover.classList.remove('hidden');
+      }
+    });
+  }
+
+  if (ui.localImageSelectPage) {
+    ui.localImageSelectPage.addEventListener('click', () => selectLocalPage('image'));
+  }
+  if (ui.localImageSelectAllBtn) {
+    ui.localImageSelectAllBtn.addEventListener('click', () => selectLocalAll('image'));
+  }
+  if (ui.localVideoSelectPage) {
+    ui.localVideoSelectPage.addEventListener('click', () => selectLocalPage('video'));
+  }
+  if (ui.localVideoSelectAllBtn) {
+    ui.localVideoSelectAllBtn.addEventListener('click', () => selectLocalAll('video'));
+  }
+
+  document.addEventListener('click', (event) => {
+    const imageWrap = ui.localImageSelectWrap;
+    const videoWrap = ui.localVideoSelectWrap;
+    if (imageWrap && imageWrap.contains(event.target)) return;
+    if (videoWrap && videoWrap.contains(event.target)) return;
+    closeAllLocalSelectMenus();
+  });
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      closeAllLocalSelectMenus();
+    }
+  });
+
+  updateLocalPaginationUI('image');
+  updateLocalPaginationUI('video');
+  refreshLocalSelectControl('image');
+  refreshLocalSelectControl('video');
+}
+
+function ensureUI() {
+  if (!ui.batchActions) cacheUI();
+}
+
+let confirmResolver = null;
+
+function setupConfirmDialog() {
+  const dialog = ui.confirmDialog;
+  if (!dialog) return;
+
+  dialog.addEventListener('close', () => {
+    if (!confirmResolver) return;
+    const ok = dialog.returnValue === 'ok';
+    confirmResolver(ok);
+    confirmResolver = null;
+  });
+
+  dialog.addEventListener('cancel', (event) => {
+    event.preventDefault();
+    dialog.close('cancel');
+  });
+
+  dialog.addEventListener('click', (event) => {
+    if (event.target === dialog) {
+      dialog.close('cancel');
+    }
+  });
+
+  if (ui.confirmOk) {
+    ui.confirmOk.addEventListener('click', () => dialog.close('ok'));
+  }
+  if (ui.confirmCancel) {
+    ui.confirmCancel.addEventListener('click', () => dialog.close('cancel'));
+  }
+}
+
+function setupFailureDialog() {
+  const dialog = ui.failureDialog;
+  if (!dialog) return;
+  if (ui.failureClose) {
+    ui.failureClose.addEventListener('click', () => dialog.close());
+  }
+  if (ui.failureRetry) {
+    ui.failureRetry.addEventListener('click', () => retryFailed());
+  }
+  dialog.addEventListener('click', (event) => {
+    if (event.target === dialog) {
+      dialog.close();
+    }
+  });
+}
+
+function setupBatchControls() {
+  if (ui.pauseActionBtn) {
+    ui.pauseActionBtn.addEventListener('click', () => togglePause());
+  }
+  if (ui.stopActionBtn) {
+    ui.stopActionBtn.addEventListener('click', () => stopActiveBatch());
+  }
+  if (ui.failureDetailsBtn) {
+    ui.failureDetailsBtn.addEventListener('click', () => showFailureDetails());
+  }
+}
+
+function confirmAction(message, options = {}) {
+  ensureUI();
+  const dialog = ui.confirmDialog;
+  if (!dialog || typeof dialog.showModal !== 'function') {
+    return Promise.resolve(window.confirm(message));
+  }
+  if (ui.confirmMessage) ui.confirmMessage.textContent = message;
+  if (ui.confirmOk) ui.confirmOk.textContent = options.okText || t('common.ok');
+  if (ui.confirmCancel) ui.confirmCancel.textContent = options.cancelText || t('common.cancel');
+  return new Promise(resolve => {
+    confirmResolver = resolve;
+    dialog.showModal();
+  });
+}
+
+function formatTime(ms) {
+  if (!ms) return '';
+  const dt = new Date(ms);
+  return dt.toLocaleString('zh-CN', { hour12: false });
+}
+
+function calcPercent(processed, total) {
+  return total ? Math.floor((processed / total) * 100) : 0;
+}
+
+const accountStates = new Map();
+let isBatchLoading = false;
+let isLoadPaused = false;
+let batchQueue = [];
+let batchTokens = [];
+let batchTotal = 0;
+let batchProcessed = 0;
+let isBatchDeleting = false;
+let isDeletePaused = false;
+let deleteTotal = 0;
+let deleteProcessed = 0;
+let currentBatchTaskId = null;
+let batchEventSource = null;
+
+async function loadStats(options = {}) {
+  try {
+    ensureUI();
+    const merge = options.merge === true;
+    const silent = options.silent === true;
+    const params = new URLSearchParams();
+    if (options.tokens && options.tokens.length) {
+      params.set('tokens', options.tokens.join(','));
+      currentScope = 'selected';
+    } else if (options.scope === 'all') {
+      params.set('scope', 'all');
+      currentScope = 'all';
+    } else if (currentToken) {
+      params.set('token', currentToken);
+      currentScope = 'single';
+    } else {
+      currentScope = 'none';
+    }
+    const url = `/v1/admin/cache${params.toString() ? `?${params.toString()}` : ''}`;
+    const res = await fetch(url, {
+      headers: buildAuthHeaders(apiKey)
+    });
+
+    if (res.status === 401) {
+      logout();
+      return;
+    }
+    const data = await res.json();
+    applyStatsData(data, merge);
+    return data;
+  } catch (e) {
+    if (!silent) showToast(t('cache.loadStatsFailed'), 'error');
+    return null;
+  }
+}
+
+function applyStatsData(data, merge = false) {
+  if (!merge) {
+    accountStates.clear();
+  }
+
+  setText(ui.imgCount, data.local_image.count);
+  setText(ui.imgSize, `${data.local_image.size_mb} MB`);
+  setText(ui.videoCount, data.local_video.count);
+  setText(ui.videoSize, `${data.local_video.size_mb} MB`);
+  setText(ui.onlineCount, data.online.count);
+
+  const online = data.online || {};
+  const status = resolveOnlineStatus(online.status);
+  setOnlineStatus(status.text, status.className);
+
+  // Update master accounts list
+  updateAccountSelect(data.online_accounts || []);
+
+  // Update dynamic states
+  const details = Array.isArray(data.online_details) ? data.online_details : [];
+  details.forEach(detail => {
+    accountStates.set(detail.token, {
+      count: detail.count,
+      status: detail.status,
+      last_asset_clear_at: detail.last_asset_clear_at
+    });
+  });
+  if (online?.token) {
+    accountStates.set(online.token, {
+      count: online.count,
+      status: online.status,
+      last_asset_clear_at: online.last_asset_clear_at
+    });
+  }
+
+  if (data.online_scope === 'all') {
+    currentScope = 'all';
+    currentToken = '';
+  } else if (data.online_scope === 'selected') {
+    currentScope = 'selected';
+  } else if (online.token) {
+    currentScope = 'single';
+    currentToken = online.token;
+  } else {
+    currentScope = 'none';
+  }
+
+  const timeText = formatTime(online.last_asset_clear_at);
+  setText(ui.onlineLastClear, timeText ? t('cache.lastClear', { time: timeText }) : '');
+
+  renderAccountTable(data);
+}
+
+function updateAccountSelect(accounts) {
+  accountMap.clear();
+  accounts.forEach(account => {
+    accountMap.set(account.token, account);
+  });
+}
+
+function renderAccountTable(data) {
+  const tbody = ui.accountTableBody;
+  const empty = ui.accountEmpty;
+  if (!tbody || !empty) return;
+
+  const details = Array.isArray(data.online_details) ? data.online_details : [];
+  const accounts = Array.isArray(data.online_accounts) ? data.online_accounts : [];
+  const detailsMap = new Map(details.map(item => [item.token, item]));
+  let rows = [];
+
+  if (accounts.length > 0) {
+    rows = accounts.map(item => {
+      const detail = detailsMap.get(item.token);
+      const state = accountStates.get(item.token);
+      let count = '-';
+      let status = 'not_loaded';
+      let last_asset_clear_at = item.last_asset_clear_at;
+
+      if (detail) {
+        count = detail.count;
+        status = detail.status;
+        last_asset_clear_at = detail.last_asset_clear_at ?? last_asset_clear_at;
+      } else if (item.token === data.online?.token) {
+        count = data.online.count;
+        status = data.online.status;
+        last_asset_clear_at = data.online.last_asset_clear_at ?? last_asset_clear_at;
+      } else if (state) {
+        count = state.count;
+        status = state.status;
+        last_asset_clear_at = state.last_asset_clear_at ?? last_asset_clear_at;
+      }
+
+      return {
+        token: item.token,
+        token_masked: item.token_masked,
+        pool: item.pool,
+        count,
+        status,
+        last_asset_clear_at
+      };
+    });
+  } else if (details.length > 0) {
+    rows = details.map(item => ({
+      token: item.token,
+      token_masked: item.token_masked,
+      pool: (accountMap.get(item.token) || {}).pool || '-',
+      count: item.count,
+      status: item.status,
+      last_asset_clear_at: item.last_asset_clear_at
+    }));
+  }
+
+  if (rows.length === 0) {
+    tbody.replaceChildren();
+    empty.classList.remove('hidden');
+    return;
+  }
+
+  empty.classList.add('hidden');
+  const selected = selectedTokens;
+  const fragment = document.createDocumentFragment();
+  rows.forEach(row => {
+    const tr = document.createElement('tr');
+    const isSelected = selected.has(row.token);
+    if (isSelected) tr.classList.add('row-selected');
+
+    const tdCheck = document.createElement('td');
+    tdCheck.className = 'text-center';
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.className = 'checkbox';
+    checkbox.checked = isSelected;
+    checkbox.setAttribute('data-token', row.token);
+    checkbox.addEventListener('change', () => toggleSelect(row.token, checkbox));
+    tdCheck.appendChild(checkbox);
+
+    const tdToken = document.createElement('td');
+    tdToken.className = 'text-left';
+    const tokenWrap = document.createElement('div');
+    tokenWrap.className = 'flex items-center gap-2';
+    const tokenText = document.createElement('span');
+    tokenText.className = 'font-mono text-xs text-gray-500';
+    tokenText.title = row.token;
+    tokenText.textContent = row.token_masked || row.token;
+    tokenWrap.appendChild(tokenText);
+    tdToken.appendChild(tokenWrap);
+
+    const tdPool = document.createElement('td');
+    tdPool.className = 'text-center';
+    const poolBadge = document.createElement('span');
+    poolBadge.className = 'badge badge-gray';
+    poolBadge.textContent = row.pool || '-';
+    tdPool.appendChild(poolBadge);
+
+    const tdCount = document.createElement('td');
+    tdCount.className = 'text-center';
+    const countBadge = document.createElement('span');
+    countBadge.className = 'badge badge-gray';
+    countBadge.textContent = row.count === '-' ? t('cache.notLoaded') : row.count;
+    tdCount.appendChild(countBadge);
+
+    const tdLast = document.createElement('td');
+    tdLast.className = 'text-left text-xs text-gray-500';
+    tdLast.textContent = formatTime(row.last_asset_clear_at) || '-';
+
+    const tdActions = document.createElement('td');
+    tdActions.className = 'text-center';
+    const actionsWrap = document.createElement('div');
+    actionsWrap.className = 'flex items-center justify-center gap-2';
+    actionsWrap.appendChild(createIconButton(
+      t('cache.clear'),
+      `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>`,
+      () => clearOnlineCache(row.token)
+    ));
+    tdActions.appendChild(actionsWrap);
+
+    tr.appendChild(tdCheck);
+    tr.appendChild(tdToken);
+    tr.appendChild(tdPool);
+    tr.appendChild(tdCount);
+    tr.appendChild(tdLast);
+    tr.appendChild(tdActions);
+    fragment.appendChild(tr);
+  });
+  tbody.replaceChildren(fragment);
+  syncSelectAllState();
+  updateSelectedCount();
+  updateBatchActionsVisibility();
+}
+
+async function clearCache(type) {
+  const ok = await confirmAction(t(type === 'image' ? 'cache.confirmClearImage' : 'cache.confirmClearVideo'), { okText: t('cache.clear') });
+  if (!ok) return;
+
+  try {
+    const res = await fetch('/v1/admin/cache/clear', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...buildAuthHeaders(apiKey)
+      },
+      body: JSON.stringify({ type })
+    });
+
+    const data = await res.json();
+    if (data.status === 'success') {
+      showToast(t('cache.clearSuccess', { size: data.result.size_mb }), 'success');
+      const state = cacheListState[type];
+      if (state) {
+        state.items = [];
+        state.total = 0;
+        state.page = 1;
+        state.loaded = true;
+        state.loading = false;
+      }
+      if (selectedLocal[type]) selectedLocal[type].clear();
+      if (state && state.visible) {
+        renderLocalCacheList(type, []);
+      } else {
+        syncLocalSelectAllState(type);
+        updateLocalPaginationUI(type);
+        updateSelectedCount();
+      }
+      loadStats();
+    } else {
+      showToast(t('cache.clearFailed'), 'error');
+    }
+  } catch (e) {
+    showToast(t('common.requestFailed'), 'error');
+  }
+}
+
+function toggleSelect(token, checkbox) {
+  if (checkbox && checkbox.checked) {
+    selectedTokens.add(token);
+  } else {
+    selectedTokens.delete(token);
+  }
+  if (checkbox) {
+    const row = checkbox.closest('tr');
+    if (row) row.classList.toggle('row-selected', checkbox.checked);
+  }
+  syncSelectAllState();
+  updateSelectedCount();
+}
+
+function toggleSelectAll(checkbox) {
+  const shouldSelect = checkbox.checked;
+  selectedTokens.clear();
+  if (shouldSelect) {
+    accountMap.forEach((_, token) => selectedTokens.add(token));
+  }
+  syncRowCheckboxes();
+  updateSelectedCount();
+}
+
+function toggleLocalSelect(type, name, checkbox) {
+  const set = selectedLocal[type];
+  if (!set) return;
+  if (checkbox && checkbox.checked) {
+    set.add(name);
+  } else {
+    set.delete(name);
+  }
+  if (checkbox) {
+    const row = checkbox.closest('tr');
+    if (row) row.classList.toggle('row-selected', checkbox.checked);
+  }
+  syncLocalSelectAllState(type);
+  updateSelectedCount();
+}
+
+function toggleLocalSelectAll(type, checkbox) {
+  if (checkbox && checkbox.checked) {
+    selectLocalPage(type);
+  } else {
+    clearLocalSelection(type);
+  }
+}
+
+function syncLocalRowCheckboxes(type) {
+  const body = type === 'image' ? ui.localImageBody : ui.localVideoBody;
+  if (!body) return;
+  const set = selectedLocal[type];
+  const checkboxes = body.querySelectorAll('input[type="checkbox"].checkbox');
+  checkboxes.forEach(cb => {
+    const name = cb.getAttribute('data-name');
+    if (!name) return;
+    cb.checked = set.has(name);
+    const row = cb.closest('tr');
+    if (row) row.classList.toggle('row-selected', cb.checked);
+  });
+  syncLocalSelectAllState(type);
+}
+
+function syncLocalSelectAllState(type) {
+  refreshLocalSelectControl(type);
+}
+
+function syncRowCheckboxes() {
+  const tbody = ui.accountTableBody;
+  if (!tbody) return;
+  const checkboxes = tbody.querySelectorAll('input[type="checkbox"].checkbox');
+  checkboxes.forEach(cb => {
+    const token = cb.getAttribute('data-token');
+    if (!token) return;
+    cb.checked = selectedTokens.has(token);
+    const row = cb.closest('tr');
+    if (row) row.classList.toggle('row-selected', cb.checked);
+  });
+}
+
+function syncSelectAllState() {
+  const selectAll = ui.selectAll;
+  if (!selectAll) return;
+  const total = accountMap.size;
+  const selected = selectedTokens.size;
+  selectAll.checked = total > 0 && selected === total;
+  selectAll.indeterminate = selected > 0 && selected < total;
+}
+
+function updateSelectedCount() {
+  const el = ui.selectedCount;
+  const selected = getActiveSelectedSet().size;
+  if (el) el.textContent = String(selected);
+  refreshLocalSelectControl('image');
+  refreshLocalSelectControl('video');
+  setActionButtonsState();
+  updateBatchActionsVisibility();
+}
+
+function updateBatchActionsVisibility() {
+  const bar = ui.batchActions;
+  if (!bar) return;
+  bar.classList.remove('hidden');
+}
+
+function updateLoadButton() {
+  const btn = ui.loadBtn;
+  if (!btn) return;
+  if (currentSection === 'online') {
+    btn.textContent = t('common.load');
+    btn.title = '';
+  } else {
+    btn.textContent = t('common.refresh');
+    btn.title = '';
+  }
+}
+
+function updateDeleteButton() {
+  const btn = ui.deleteBtn;
+  if (!btn) return;
+  if (currentSection === 'online') {
+    btn.textContent = t('cache.clean');
+    btn.title = '';
+  } else {
+    btn.textContent = t('common.delete');
+    btn.title = '';
+  }
+}
+
+
+function setActionButtonsState() {
+  const loadBtn = ui.loadBtn;
+  const deleteBtn = ui.deleteBtn;
+  const disabled = isBatchLoading || isBatchDeleting || isLocalDeleting;
+  const noSelection = getActiveSelectedSet().size === 0;
+  if (loadBtn) {
+    if (currentSection === 'online') {
+      loadBtn.disabled = disabled || noSelection;
+    } else {
+      loadBtn.disabled = disabled;
+    }
+  }
+  if (deleteBtn) {
+    if (currentSection === 'online') {
+      deleteBtn.disabled = disabled || noSelection;
+    } else {
+      deleteBtn.disabled = disabled || noSelection;
+    }
+  }
+}
+
+function updateBatchProgress() {
+  const container = ui.batchProgress;
+  if (!container || !ui.batchProgressText) return;
+  if (currentSection !== 'online') {
+    container.classList.add('hidden');
+    if (ui.pauseActionBtn) ui.pauseActionBtn.classList.add('hidden');
+    if (ui.stopActionBtn) ui.stopActionBtn.classList.add('hidden');
+    return;
+  }
+  if (!isBatchLoading && !isBatchDeleting) {
+    container.classList.add('hidden');
+    if (ui.pauseActionBtn) ui.pauseActionBtn.classList.add('hidden');
+    if (ui.stopActionBtn) ui.stopActionBtn.classList.add('hidden');
+    return;
+  }
+
+  const isLoading = isBatchLoading;
+  const processed = isLoading ? batchProcessed : deleteProcessed;
+  const total = isLoading ? batchTotal : deleteTotal;
+  const percent = calcPercent(processed, total);
+  ui.batchProgressText.textContent = `${percent}%`;
+  container.classList.remove('hidden');
+
+  if (ui.pauseActionBtn) {
+    ui.pauseActionBtn.classList.add('hidden');
+  }
+  if (ui.stopActionBtn) {
+    ui.stopActionBtn.classList.remove('hidden');
+  }
+}
+
+function refreshBatchUI() {
+  setActionButtonsState();
+  updateBatchActionsVisibility();
+  updateBatchProgress();
+}
+
+function setOnlineStatus(text, className) {
+  const statusEl = ui.onlineStatus;
+  if (!statusEl) return;
+  statusEl.textContent = text;
+  statusEl.className = className;
+}
+
+function getActiveSelectedSet() {
+  if (currentSection === 'online') return selectedTokens;
+  return selectedLocal[currentSection] || new Set();
+}
+
+function updateToolbarForSection() {
+  updateLoadButton();
+  updateDeleteButton();
+  updateSelectedCount();
+  updateBatchProgress();
+}
+
+function updateOnlineCountFromTokens(tokens) {
+  let total = 0;
+  tokens.forEach(token => {
+    const state = accountStates.get(token);
+    if (state && typeof state.count === 'number') {
+      total += state.count;
+    }
+  });
+  setText(ui.onlineCount, String(total));
+}
+
+function formatSize(bytes) {
+  if (bytes === 0 || bytes === null || bytes === undefined) return '-';
+  const kb = 1024;
+  const mb = kb * 1024;
+  if (bytes >= mb) return `${(bytes / mb).toFixed(2)} MB`;
+  if (bytes >= kb) return `${(bytes / kb).toFixed(1)} KB`;
+  return `${bytes} B`;
+}
+
+async function showCacheSection(type) {
+  ensureUI();
+  currentSection = type;
+  if (ui.cacheCards) {
+    ui.cacheCards.forEach(card => {
+      const cardType = card.getAttribute('data-type');
+      card.classList.toggle('selected', cardType === type);
+    });
+  }
+  if (type === 'image') {
+    cacheListState.image.visible = true;
+    cacheListState.video.visible = false;
+    if (cacheListState.image.loaded) renderLocalCacheList('image', cacheListState.image.items);
+    else await loadLocalCacheList('image');
+    if (ui.localCacheLists) ui.localCacheLists.classList.remove('hidden');
+    if (ui.localImageList) ui.localImageList.classList.remove('hidden');
+    if (ui.localVideoList) ui.localVideoList.classList.add('hidden');
+    if (ui.onlineAssetsTable) ui.onlineAssetsTable.classList.add('hidden');
+    updateToolbarForSection();
+    return;
+  }
+  if (type === 'video') {
+    cacheListState.video.visible = true;
+    cacheListState.image.visible = false;
+    if (cacheListState.video.loaded) renderLocalCacheList('video', cacheListState.video.items);
+    else await loadLocalCacheList('video');
+    if (ui.localCacheLists) ui.localCacheLists.classList.remove('hidden');
+    if (ui.localVideoList) ui.localVideoList.classList.remove('hidden');
+    if (ui.localImageList) ui.localImageList.classList.add('hidden');
+    if (ui.onlineAssetsTable) ui.onlineAssetsTable.classList.add('hidden');
+    updateToolbarForSection();
+    return;
+  }
+  if (type === 'online') {
+    cacheListState.image.visible = false;
+    cacheListState.video.visible = false;
+    if (ui.localCacheLists) ui.localCacheLists.classList.add('hidden');
+    if (ui.localImageList) ui.localImageList.classList.add('hidden');
+    if (ui.localVideoList) ui.localVideoList.classList.add('hidden');
+    if (ui.onlineAssetsTable) ui.onlineAssetsTable.classList.remove('hidden');
+    updateToolbarForSection();
+  }
+}
+
+async function toggleCacheList(type) {
+  await showCacheSection(type);
+}
+
+async function loadLocalCacheList(type, options = {}) {
+  const body = type === 'image' ? ui.localImageBody : ui.localVideoBody;
+  if (!body) return;
+  const state = getLocalState(type);
+  if (!state) return;
+  const pageSize = Math.max(
+    1,
+    parseInt(options.pageSize ?? state.pageSize ?? LOCAL_PAGE_SIZE_DEFAULT, 10) || LOCAL_PAGE_SIZE_DEFAULT
+  );
+  const targetPage = Math.max(1, parseInt(options.page ?? state.page ?? 1, 10) || 1);
+  state.loading = true;
+  state.pageSize = pageSize;
+  state.page = targetPage;
+  updateLocalPaginationUI(type);
+  body.innerHTML = `<tr><td colspan="5">${t('common.loading')}</td></tr>`;
+  try {
+    const params = new URLSearchParams({
+      type,
+      page: String(targetPage),
+      page_size: String(pageSize)
+    });
+    const res = await fetch(`/v1/admin/cache/list?${params.toString()}`, {
+      headers: buildAuthHeaders(apiKey)
+    });
+    if (!res.ok) {
+      body.innerHTML = `<tr><td colspan="5">${t('common.loadFailed')}</td></tr>`;
+      state.loading = false;
+      updateLocalPaginationUI(type);
+      return;
+    }
+    const data = await res.json();
+    const items = Array.isArray(data.items) ? data.items : [];
+    const total = Math.max(0, Number(data.total) || 0);
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    if (total > 0 && targetPage > totalPages) {
+      state.loading = false;
+      await loadLocalCacheList(type, { page: totalPages, pageSize });
+      return;
+    }
+    state.items = items;
+    state.total = total;
+    state.page = Math.min(targetPage, totalPages);
+    state.pageSize = pageSize;
+    state.loaded = true;
+    state.loading = false;
+    renderLocalCacheList(type, items);
+  } catch (e) {
+    body.innerHTML = `<tr><td colspan="5">${t('common.loadFailed')}</td></tr>`;
+    state.loading = false;
+    updateLocalPaginationUI(type);
+  }
+}
+
+function renderLocalCacheList(type, items) {
+  const body = type === 'image' ? ui.localImageBody : ui.localVideoBody;
+  if (!body) return;
+  if (!items || items.length === 0) {
+    body.innerHTML = `<tr><td colspan="5" class="table-empty">${t('cache.noFiles')}</td></tr>`;
+    syncLocalSelectAllState(type);
+    updateLocalPaginationUI(type);
+    updateSelectedCount();
+    return;
+  }
+  const selected = selectedLocal[type];
+  const fragment = document.createDocumentFragment();
+  items.forEach(item => {
+    const tr = document.createElement('tr');
+    const isSelected = selected.has(item.name);
+    if (isSelected) tr.classList.add('row-selected');
+
+    const tdCheck = document.createElement('td');
+    tdCheck.className = 'text-center';
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.className = 'checkbox';
+    checkbox.checked = isSelected;
+    checkbox.setAttribute('data-name', item.name);
+    checkbox.onchange = () => toggleLocalSelect(type, item.name, checkbox);
+    tdCheck.appendChild(checkbox);
+
+    const tdName = document.createElement('td');
+    tdName.className = 'text-left';
+    const nameWrap = document.createElement('div');
+    nameWrap.className = 'flex items-center gap-2';
+    if (item.preview_url) {
+      const img = document.createElement('img');
+      img.src = item.preview_url;
+      img.alt = '';
+      img.className = 'cache-preview';
+      img.loading = 'lazy';
+      img.decoding = 'async';
+      nameWrap.appendChild(img);
+    }
+    const nameText = document.createElement('span');
+    nameText.className = 'font-mono text-xs text-gray-500';
+    nameText.textContent = item.name;
+    nameWrap.appendChild(nameText);
+    tdName.appendChild(nameWrap);
+
+    const tdSize = document.createElement('td');
+    tdSize.className = 'text-left';
+    tdSize.textContent = formatSize(item.size_bytes);
+
+    const tdTime = document.createElement('td');
+    tdTime.className = 'text-left text-xs text-gray-500';
+    tdTime.textContent = formatTime(item.mtime_ms);
+
+    const tdActions = document.createElement('td');
+    tdActions.className = 'text-center';
+    tdActions.innerHTML = `
+      <div class="cache-list-actions">
+        <button class="cache-icon-button" onclick="viewLocalFile('${type}', '${item.name}')" title="${t('common.view')}">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z"></path>
+            <circle cx="12" cy="12" r="3"></circle>
+          </svg>
+        </button>
+        <button class="cache-icon-button" onclick="deleteLocalFile('${type}', '${item.name}')" title="${t('common.delete')}">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="3 6 5 6 21 6"></polyline>
+            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+          </svg>
+        </button>
+      </div>
+    `;
+
+    tr.appendChild(tdCheck);
+    tr.appendChild(tdName);
+    tr.appendChild(tdSize);
+    tr.appendChild(tdTime);
+    tr.appendChild(tdActions);
+    fragment.appendChild(tr);
+  });
+  body.replaceChildren(fragment);
+  syncLocalSelectAllState(type);
+  updateLocalPaginationUI(type);
+  updateSelectedCount();
+}
+
+function viewLocalFile(type, name) {
+  const safeName = encodeURIComponent(name);
+  const url = type === 'image' ? `/v1/files/image/${safeName}` : `/v1/files/video/${safeName}`;
+  window.open(url, '_blank');
+}
+
+async function deleteLocalFile(type, name) {
+  const ok = await confirmAction(t('cache.confirmDeleteFile'), { okText: t('common.delete') });
+  if (!ok) return;
+  const okDelete = await requestDeleteLocalFile(type, name);
+  if (!okDelete) return;
+  showToast(t('common.deleteSuccess'), 'success');
+  const state = getLocalState(type);
+  if (state) {
+    selectedLocal[type]?.delete(name);
+    if (state.total > 0) state.total -= 1;
+    await loadLocalCacheList(type, { page: state.page, pageSize: state.pageSize });
+  }
+  await loadStats();
+}
+
+async function requestDeleteLocalFile(type, name) {
+  try {
+    const res = await fetch('/v1/admin/cache/item/delete', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...buildAuthHeaders(apiKey)
+      },
+      body: JSON.stringify({ type, name })
+    });
+    return res.ok;
+  } catch (e) {
+    return false;
+  }
+}
+
+async function deleteSelectedLocal(type) {
+  const selected = selectedLocal[type];
+  const names = selected ? Array.from(selected) : [];
+  if (names.length === 0) {
+    showToast(t('cache.noFilesSelected'), 'info');
+    return;
+  }
+  const ok = await confirmAction(t('cache.confirmBatchDeleteFiles', { count: names.length }), { okText: t('common.delete') });
+  if (!ok) return;
+  isLocalDeleting = true;
+  setActionButtonsState();
+  let success = 0;
+  let failed = 0;
+  const batchSize = 10;
+  for (let i = 0; i < names.length; i += batchSize) {
+    const chunk = names.slice(i, i + batchSize);
+    const results = await Promise.all(chunk.map(name => requestDeleteLocalFile(type, name)));
+    results.forEach((ok, idx) => {
+      if (ok) {
+        success += 1;
+      } else {
+        failed += 1;
+      }
+    });
+  }
+  const state = getLocalState(type);
+  selectedLocal[type].clear();
+  if (state) {
+    await loadLocalCacheList(type, { page: state.page, pageSize: state.pageSize });
+  }
+  await loadStats();
+  isLocalDeleting = false;
+  setActionButtonsState();
+  if (failed === 0) {
+    showToast(t('cache.deletedFiles', { count: success }), 'success');
+  } else {
+    showToast(t('cache.deleteResult', { success: success, failed: failed }), 'info');
+  }
+}
+
+function handleLoadClick() {
+  ensureUI();
+  if (isBatchLoading || isBatchDeleting) {
+    showToast(t('common.taskInProgress'), 'info');
+    return;
+  }
+  if (currentSection === 'online') {
+    loadSelectedAccounts();
+  } else {
+    loadLocalCacheList(currentSection);
+  }
+}
+
+function handleDeleteClick() {
+  ensureUI();
+  if (isBatchLoading || isBatchDeleting) {
+    showToast(t('common.taskInProgress'), 'info');
+    return;
+  }
+  if (currentSection === 'online') {
+    clearSelectedAccounts();
+  } else {
+    deleteSelectedLocal(currentSection);
+  }
+}
+
+function stopBatchLoad(options = {}) {
+  if (!isBatchLoading) return;
+  isBatchLoading = false;
+  isLoadPaused = false;
+  currentBatchAction = null;
+  batchQueue = [];
+  BatchSSE.close(batchEventSource);
+  batchEventSource = null;
+  currentBatchTaskId = null;
+  setOnlineStatus(t('common.terminated'), 'text-xs text-[var(--accents-4)] mt-1');
+  updateLoadButton();
+  refreshBatchUI();
+  if (!options.silent) showToast(t('cache.stoppedLoadRequests'), 'info');
+}
+
+function stopBatchDelete(options = {}) {
+  if (!isBatchDeleting) return;
+  isBatchDeleting = false;
+  isDeletePaused = false;
+  currentBatchAction = null;
+  batchQueue = [];
+  BatchSSE.close(batchEventSource);
+  batchEventSource = null;
+  currentBatchTaskId = null;
+  updateDeleteButton();
+  refreshBatchUI();
+  if (!options.silent) showToast(t('cache.stoppedCleanRequests'), 'info');
+}
+
+function togglePause() {
+  if (isBatchLoading || isBatchDeleting) {
+    showToast(t('common.batchNoPause'), 'info');
+  }
+}
+
+function stopActiveBatch() {
+  if (isBatchLoading) {
+    BatchSSE.cancel(currentBatchTaskId, apiKey);
+    stopBatchLoad();
+  } else if (isBatchDeleting) {
+    BatchSSE.cancel(currentBatchTaskId, apiKey);
+    stopBatchDelete();
+  }
+}
+
+function getMaskedToken(token) {
+  const meta = accountMap.get(token);
+  if (meta && meta.token_masked) return meta.token_masked;
+  if (!token) return '';
+  return token.length > 12 ? `${token.slice(0, 6)}...${token.slice(-4)}` : token;
+}
+
+function showFailureDetails() {
+  ensureUI();
+  const dialog = ui.failureDialog;
+  if (!dialog || !ui.failureList) return;
+  let action = currentBatchAction || lastBatchAction;
+  if (!action) {
+    action = deleteFailed.size > 0 ? 'delete' : 'load';
+  }
+  const failures = action === 'delete' ? deleteFailed : loadFailed;
+  ui.failureList.innerHTML = '';
+  failures.forEach((reason, token) => {
+    const item = document.createElement('div');
+    item.className = 'failure-item';
+    const tokenEl = document.createElement('div');
+    tokenEl.className = 'failure-token';
+    tokenEl.textContent = getMaskedToken(token);
+    const reasonEl = document.createElement('div');
+    reasonEl.textContent = reason;
+    item.appendChild(tokenEl);
+    item.appendChild(reasonEl);
+    ui.failureList.appendChild(item);
+  });
+  dialog.showModal();
+}
+
+function retryFailed() {
+  const action = currentBatchAction || lastBatchAction || (deleteFailed.size > 0 ? 'delete' : 'load');
+  const failures = action === 'delete' ? deleteFailed : loadFailed;
+  const tokens = Array.from(failures.keys());
+  if (tokens.length === 0) return;
+  if (isBatchLoading || isBatchDeleting) {
+    showToast(t('common.waitTaskFinish'), 'info');
+    return;
+  }
+  if (ui.failureDialog) ui.failureDialog.close();
+  if (action === 'delete') {
+    startBatchDelete(tokens);
+  } else {
+    startBatchLoad(tokens);
+  }
+}
+
+async function startBatchLoad(tokens) {
+  if (isBatchLoading) {
+    showToast(t('common.loadingInProgress'), 'info');
+    return;
+  }
+  if (isBatchDeleting) {
+    showToast(t('common.cleaningInProgress'), 'info');
+    return;
+  }
+  if (!tokens || tokens.length === 0) return;
+  isBatchLoading = true;
+  isLoadPaused = false;
+  currentBatchAction = 'load';
+  lastBatchAction = 'load';
+  loadFailed.clear();
+  batchTokens = tokens.slice();
+  batchQueue = tokens.slice();
+  batchTotal = batchQueue.length;
+  batchProcessed = 0;
+
+  batchTokens.forEach(token => accountStates.delete(token));
+  updateOnlineCountFromTokens(batchTokens);
+  setOnlineStatus(t('cache.loadingStatus'), 'text-xs text-blue-600 mt-1');
+  updateLoadButton();
+  if (accountMap.size > 0) {
+    renderAccountTable({ online_accounts: Array.from(accountMap.values()), online_details: [], online: {} });
+  }
+  refreshBatchUI();
+
+  try {
+    const res = await fetch('/v1/admin/cache/online/load/async', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...buildAuthHeaders(apiKey)
+      },
+      body: JSON.stringify({ tokens })
+    });
+    const data = await res.json();
+    if (!res.ok || data.status !== 'success') {
+      throw new Error(data.detail || t('common.requestFailed'));
+    }
+
+    currentBatchTaskId = data.task_id;
+    BatchSSE.close(batchEventSource);
+    batchEventSource = BatchSSE.open(currentBatchTaskId, apiKey, {
+      onMessage: (msg) => {
+        if (msg.type === 'snapshot' || msg.type === 'progress') {
+          if (typeof msg.total === 'number') batchTotal = msg.total;
+          if (typeof msg.processed === 'number') batchProcessed = msg.processed;
+          updateBatchProgress();
+        } else if (msg.type === 'done') {
+          if (typeof msg.total === 'number') batchTotal = msg.total;
+          batchProcessed = batchTotal;
+          updateBatchProgress();
+          const result = msg.result;
+          if (result) {
+            applyStatsData(result, true);
+            const details = Array.isArray(result.online_details) ? result.online_details : [];
+            loadFailed.clear();
+            details.forEach(detail => {
+              if (detail.status !== 'ok') loadFailed.set(detail.token, detail.status);
+            });
+          }
+          finishBatchLoad();
+          if (msg.warning) {
+            showToast(t('cache.loadDone') + '\n⚠️ ' + msg.warning, 'warning');
+          }
+          currentBatchTaskId = null;
+          BatchSSE.close(batchEventSource);
+          batchEventSource = null;
+        } else if (msg.type === 'cancelled') {
+          stopBatchLoad({ silent: true });
+          showToast(t('cache.loadStopped'), 'info');
+          currentBatchTaskId = null;
+          BatchSSE.close(batchEventSource);
+          batchEventSource = null;
+        } else if (msg.type === 'error') {
+          stopBatchLoad({ silent: true });
+          showToast(t('cache.loadFailedMsg', { msg: msg.error || t('common.unknownError') }), 'error');
+          currentBatchTaskId = null;
+          BatchSSE.close(batchEventSource);
+          batchEventSource = null;
+        }
+      },
+      onError: () => {
+        stopBatchLoad({ silent: true });
+        showToast(t('common.connectionInterrupted'), 'error');
+        currentBatchTaskId = null;
+        BatchSSE.close(batchEventSource);
+        batchEventSource = null;
+      }
+    });
+  } catch (e) {
+    stopBatchLoad({ silent: true });
+    showToast(e.message || t('common.requestFailed'), 'error');
+  }
+}
+
+function finishBatchLoad() {
+  isBatchLoading = false;
+  isLoadPaused = false;
+  currentBatchAction = null;
+  updateOnlineCountFromTokens(batchTokens);
+  const hasError = batchTokens.some(token => {
+    const state = accountStates.get(token);
+    return !state || (state.status && state.status !== 'ok');
+  });
+  if (batchTokens.length === 0) {
+    setOnlineStatus(t('cache.notLoaded'), 'text-xs text-[var(--accents-4)] mt-1');
+  } else if (hasError) {
+    setOnlineStatus(t('common.partialError'), 'text-xs text-orange-500 mt-1');
+  } else {
+    setOnlineStatus(t('common.connected'), 'text-xs text-green-600 mt-1');
+  }
+  updateLoadButton();
+  refreshBatchUI();
+}
+
+async function loadSelectedAccounts() {
+  if (selectedTokens.size === 0) {
+    showToast(t('cache.selectAccountsToLoad'), 'error');
+    return;
+  }
+  startBatchLoad(Array.from(selectedTokens));
+}
+
+async function loadAllAccounts() {
+  const tokens = Array.from(accountMap.keys());
+  if (tokens.length === 0) {
+    showToast(t('cache.noAccounts'), 'error');
+    return;
+  }
+  startBatchLoad(tokens);
+}
+
+async function clearSelectedAccounts() {
+  if (selectedTokens.size === 0) {
+    showToast(t('cache.selectAccountsToClear'), 'error');
+    return;
+  }
+  if (isBatchDeleting) {
+    showToast(t('common.cleaningInProgress'), 'info');
+    return;
+  }
+  if (isBatchLoading) {
+    showToast(t('common.loadingInProgress'), 'info');
+    return;
+  }
+  const ok = await confirmAction(t('cache.confirmClearAccounts', { count: selectedTokens.size }), { okText: t('cache.clear') });
+  if (!ok) return;
+  startBatchDelete(Array.from(selectedTokens));
+}
+
+async function startBatchDelete(tokens) {
+  if (!tokens || tokens.length === 0) return;
+  isBatchDeleting = true;
+  isDeletePaused = false;
+  currentBatchAction = 'delete';
+  lastBatchAction = 'delete';
+  deleteFailed.clear();
+  deleteTotal = tokens.length;
+  deleteProcessed = 0;
+  batchQueue = tokens.slice();
+  showToast(t('cache.batchCleanInProgress'), 'info');
+  updateDeleteButton();
+  refreshBatchUI();
+  try {
+    const res = await fetch('/v1/admin/cache/online/clear/async', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...buildAuthHeaders(apiKey)
+      },
+      body: JSON.stringify({ tokens })
+    });
+    const data = await res.json();
+    if (!res.ok || data.status !== 'success') {
+      throw new Error(data.detail || t('common.requestFailed'));
+    }
+
+    currentBatchTaskId = data.task_id;
+    BatchSSE.close(batchEventSource);
+    batchEventSource = BatchSSE.open(currentBatchTaskId, apiKey, {
+      onMessage: (msg) => {
+        if (msg.type === 'snapshot' || msg.type === 'progress') {
+          if (typeof msg.total === 'number') deleteTotal = msg.total;
+          if (typeof msg.processed === 'number') deleteProcessed = msg.processed;
+          updateBatchProgress();
+        } else if (msg.type === 'done') {
+          if (typeof msg.total === 'number') deleteTotal = msg.total;
+          deleteProcessed = deleteTotal;
+          updateBatchProgress();
+          const result = msg.result;
+          deleteFailed.clear();
+          if (result && result.results) {
+            Object.entries(result.results).forEach(([token, res]) => {
+              if (res.status !== 'success') {
+                deleteFailed.set(token, res.error || t('cache.cleanFailedEntry'));
+              }
+            });
+          }
+          finishBatchDelete();
+          if (msg.warning) {
+            showToast(t('cache.batchCleanDone') + '\n⚠️ ' + msg.warning, 'warning');
+          }
+          currentBatchTaskId = null;
+          BatchSSE.close(batchEventSource);
+          batchEventSource = null;
+        } else if (msg.type === 'cancelled') {
+          stopBatchDelete({ silent: true });
+          showToast(t('cache.cleanStopped'), 'info');
+          currentBatchTaskId = null;
+          BatchSSE.close(batchEventSource);
+          batchEventSource = null;
+        } else if (msg.type === 'error') {
+          stopBatchDelete({ silent: true });
+          showToast(t('cache.cleanFailedMsg', { msg: msg.error || t('common.unknownError') }), 'error');
+          currentBatchTaskId = null;
+          BatchSSE.close(batchEventSource);
+          batchEventSource = null;
+        }
+      },
+      onError: () => {
+        stopBatchDelete({ silent: true });
+        showToast(t('common.connectionInterrupted'), 'error');
+        currentBatchTaskId = null;
+        BatchSSE.close(batchEventSource);
+        batchEventSource = null;
+      }
+    });
+  } catch (e) {
+    stopBatchDelete({ silent: true });
+    showToast(e.message || t('common.requestFailed'), 'error');
+  }
+}
+
+function finishBatchDelete() {
+  isBatchDeleting = false;
+  isDeletePaused = false;
+  currentBatchAction = null;
+  updateDeleteButton();
+  refreshBatchUI();
+  showToast(t('cache.batchCleanDone'), 'success');
+  loadStats();
+}
+
+async function clearOnlineCache(targetToken = '', skipConfirm = false) {
+  const tokenToClear = targetToken || (currentScope === 'all' ? '' : currentToken);
+  if (!tokenToClear) {
+    showToast(t('cache.selectAccountsToClear'), 'error');
+    return;
+  }
+  const meta = accountMap.get(tokenToClear);
+  const label = meta ? meta.token_masked : tokenToClear;
+  if (!skipConfirm) {
+    const ok = await confirmAction(t('cache.confirmClearAccount', { label: label }), { okText: t('cache.clear') });
+    if (!ok) return;
+  }
+
+  showToast(t('cache.cleanInProgress'), 'info');
+
+  try {
+    const res = await fetch('/v1/admin/cache/online/clear', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...buildAuthHeaders(apiKey)
+      },
+      body: JSON.stringify({ token: tokenToClear })
+    });
+
+    const data = await res.json();
+    if (data.status === 'success') {
+      showToast(t('cache.cleanResult', { success: data.result.success, failed: data.result.failed }), 'success');
+    } else {
+      showToast(t('cache.clearFailed'), 'error');
+    }
+  } catch (e) {
+    showToast(t('cache.requestTimeout'), 'error');
+  }
+}
+
+window.onload = init;
