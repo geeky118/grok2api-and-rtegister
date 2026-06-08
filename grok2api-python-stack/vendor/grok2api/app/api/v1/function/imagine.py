@@ -186,6 +186,7 @@ async def function_imagine_ws(websocket: WebSocket):
             }
         )
 
+        consecutive_failures = 0
         while not stop_event.is_set():
             try:
                 await token_mgr.reload_if_stale()
@@ -213,11 +214,11 @@ async def function_imagine_ws(websocket: WebSocket):
                     token=token,
                     model_info=model_info,
                     prompt=prompt,
-                    n=6,
+                    n=1,
                     response_format="b64_json",
                     size="1024x1024",
                     aspect_ratio=aspect_ratio,
-                    stream=True,
+                    stream=False,
                     enable_nsfw=nsfw,
                 )
                 if result.stream:
@@ -231,6 +232,7 @@ async def function_imagine_ws(websocket: WebSocket):
                 else:
                     images = [img for img in result.data if img and img != "error"]
                     if images:
+                        consecutive_failures = 0
                         for img_b64 in images:
                             await _send(
                                 {
@@ -241,27 +243,26 @@ async def function_imagine_ws(websocket: WebSocket):
                                     "run_id": run_id,
                                 }
                             )
+                        await asyncio.sleep(2)
                     else:
-                        await _send(
-                            {
-                                "type": "error",
-                                "message": "Image generation returned empty data.",
-                                "code": "empty_image",
-                            }
-                        )
+                        raise RuntimeError("Image generation returned empty data.")
 
             except asyncio.CancelledError:
                 break
             except Exception as e:
+                consecutive_failures += 1
                 logger.warning(f"Imagine stream error: {e}")
                 await _send(
                     {
-                        "type": "error",
+                        "type": "status",
+                        "status": "retrying",
                         "message": str(e),
-                        "code": "internal_error",
+                        "code": "temporary_generation_error",
+                        "failures": consecutive_failures,
+                        "run_id": run_id,
                     }
                 )
-                await asyncio.sleep(1.5)
+                await asyncio.sleep(min(10, 1.5 * consecutive_failures))
 
         await _send({"type": "status", "status": "stopped", "run_id": run_id})
 
@@ -383,6 +384,7 @@ async def function_imagine_sse(
             token_mgr = await get_token_manager()
             sequence = 0
             run_id = uuid.uuid4().hex
+            consecutive_failures = 0
 
             yield (
                 f"data: {orjson.dumps({'type': 'status', 'status': 'running', 'prompt': prompt, 'aspect_ratio': ratio, 'run_id': run_id}).decode()}\n\n"
@@ -418,11 +420,11 @@ async def function_imagine_sse(
                         token=token,
                         model_info=model_info,
                         prompt=prompt,
-                        n=6,
+                        n=1,
                         response_format="b64_json",
                         size="1024x1024",
                         aspect_ratio=ratio,
-                        stream=True,
+                        stream=False,
                         enable_nsfw=nsfw,
                     )
                     if result.stream:
@@ -436,6 +438,7 @@ async def function_imagine_sse(
                     else:
                         images = [img for img in result.data if img and img != "error"]
                         if images:
+                            consecutive_failures = 0
                             for img_b64 in images:
                                 sequence += 1
                                 payload = {
@@ -447,18 +450,18 @@ async def function_imagine_sse(
                                     "run_id": run_id,
                                 }
                                 yield f"data: {orjson.dumps(payload).decode()}\n\n"
+                            await asyncio.sleep(2)
                         else:
-                            yield (
-                                f"data: {orjson.dumps({'type': 'error', 'message': 'Image generation returned empty data.', 'code': 'empty_image'}).decode()}\n\n"
-                            )
+                            raise RuntimeError("Image generation returned empty data.")
                 except asyncio.CancelledError:
                     break
                 except Exception as e:
+                    consecutive_failures += 1
                     logger.warning(f"Imagine SSE error: {e}")
                     yield (
-                        f"data: {orjson.dumps({'type': 'error', 'message': str(e), 'code': 'internal_error'}).decode()}\n\n"
+                        f"data: {orjson.dumps({'type': 'status', 'status': 'retrying', 'message': str(e), 'code': 'temporary_generation_error', 'failures': consecutive_failures, 'run_id': run_id}).decode()}\n\n"
                     )
-                    await asyncio.sleep(1.5)
+                    await asyncio.sleep(min(10, 1.5 * consecutive_failures))
 
             yield (
                 f"data: {orjson.dumps({'type': 'status', 'status': 'stopped', 'run_id': run_id}).decode()}\n\n"

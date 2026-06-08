@@ -67,6 +67,32 @@
 
 ## 已修复问题
 
+### 0. Grok app-chat 403 反爬修复 (2026-06-08)
+
+**问题**: `Chat`、`玩法 Chat`、`生图` 同时返回 502，日志中上游错误为 `Request rejected by anti-bot rules`。
+
+**结论**: Grok 网页端 app-chat 请求格式已变化，旧的 `modelName/modelMode` payload 和全局 CF cookie 方式会被反爬拒绝。已根据真实浏览器 UI 抓包改为 `modeId:"fast"` payload、app-chat 专用浏览器 headers，并在发 app-chat 前 warmup `https://grok.com/` 建立当前会话 cookie。
+
+**当前可用节点**: `2x专线-日本-1`。不要随意切换；切换后需要重新验证 Chat、玩法 Chat 和生图。
+
+**维护 runbook**: [grok-app-chat-antibot-runbook.md](grok2api-python-stack/docs/grok-app-chat-antibot-runbook.md)
+
+### 0a. 玩法 Imagine WS/SSE 卡在生成中修复 (2026-06-08)
+
+**问题**: 普通 `/v1/images/generations` 已经可用，但玩法页面 Imagine 瀑布流的 `/v1/function/imagine/ws` 或 `/v1/function/imagine/sse` 会长时间停在“生成中”。
+
+**结论**: WS/SSE 传输、nginx、SSL 和鉴权都是正常的；根因是玩法瀑布流原先使用 `n=6` + `stream=True`，而当前 Grok app-chat 生图流式最终事件不稳定。
+
+**修复**:
+- WS/SSE 玩法生图改为 `n=1`
+- WS/SSE 玩法生图改为 `stream=False`
+- 成功时直接返回 `type:"image"` + `b64_json`
+- 上游 429 或空结果改为 `status:"retrying"` 并退避重试，不再直接向前端发送错误态
+
+**验证**:
+- 本机公网请求 `https://grok2api.hello4am.com/v1/function/imagine/sse` 已收到 `type:"image"`
+- 本机公网连接 `wss://grok2api.hello4am.com/v1/function/imagine/ws` 已收到 `type:"image"`
+
 ### 1. 图片生成 403 修复 (2026-05-17)
 
 **问题**: `POST /v1/images/generations` 返回 403 "Model is not found"

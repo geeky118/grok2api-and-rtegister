@@ -17,6 +17,7 @@ from app.services.reverse.utils.headers import build_headers
 from app.services.reverse.utils.retry import extract_status_for_retry, retry_on_status
 
 CHAT_API = "https://grok.com/rest/app-chat/conversations/new"
+GROK_HOME = "https://grok.com/"
 _LAST_PROXY_LOG_STATE: tuple[str, str] | None = None
 
 from app.services.reverse.utils.cf_refresh import trigger_cf_refresh_on_403 as _trigger_cf_refresh_on_403
@@ -50,6 +51,31 @@ def _log_proxy_state_once(base_proxy: str, normalized_proxy: str = "", scheme: s
         )
     else:
         logger.info("AppChatReverse proxy is empty, requests will use direct network")
+
+
+def _build_base_sso_cookie(token: str) -> str:
+    token = token[4:] if token.startswith("sso=") else token
+    return f"sso={token}; sso-rw={token}"
+
+
+def _apply_app_chat_browser_headers(headers: Dict[str, str]) -> None:
+    headers["User-Agent"] = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/146.0.0.0 Safari/537.36"
+    )
+    headers["Accept-Language"] = "zh-CN"
+    headers["Sec-Ch-Ua"] = (
+        '"Chromium";v="146", "Google Chrome";v="146", "Not/A)Brand";v="99"'
+    )
+    headers["Sec-Ch-Ua-Mobile"] = "?0"
+    headers["Sec-Ch-Ua-Platform"] = '"Windows"'
+    headers.pop("Sec-Ch-Ua-Arch", None)
+    headers.pop("Sec-Ch-Ua-Bitness", None)
+    headers.pop("Sec-Ch-Ua-Model", None)
+    headers["x-statsig-id"] = (
+        "UztAg8VeBZAvSb//3/MjEygQIh5Ro0QI0ypHL5i8jkJ0BeN1FlCnV3Jvga+7X5utcFlvhFadiImz7v9/1hnhK9sDf5abUA"
+    )
 
 
 class AppChatReverse:
@@ -117,49 +143,51 @@ class AppChatReverse:
         """Build chat payload for Grok app-chat API."""
 
         attachments = file_attachments or []
+        use_fast_mode = model == "grok-3" or mode == "MODEL_MODE_FAST"
 
         payload = {
-            "deviceEnvInfo": {
-                "darkModeEnabled": False,
-                "devicePixelRatio": 2,
-                "screenHeight": 1329,
-                "screenWidth": 2056,
-                "viewportHeight": 1083,
-                "viewportWidth": 2056,
-            },
-            "disableMemory": get_config("app.disable_memory"),
-            "disableSearch": False,
-            "disableSelfHarmShortCircuit": False,
-            "disableTextFollowUps": False,
-            "enableImageGeneration": True,
-            "enableImageStreaming": True,
-            "enableSideBySide": True,
-            "fileAttachments": attachments,
-            "forceConcise": False,
-            "forceSideBySide": False,
-            "imageAttachments": [],
-            "imageGenerationCount": 2,
-            "isAsyncChat": False,
-            "isReasoning": False,
+            "temporary": get_config("app.temporary"),
             "message": message,
+            "fileAttachments": attachments,
+            "imageAttachments": [],
+            "disableSearch": False,
+            "enableImageGeneration": True,
             "returnImageBytes": False,
             "returnRawGrokInXaiRequest": False,
+            "enableImageStreaming": True,
+            "imageGenerationCount": 2,
+            "forceConcise": False,
+            "enableSideBySide": True,
             "sendFinalMetadata": True,
-            "temporary": get_config("app.temporary"),
+            "disableTextFollowUps": False,
+            "responseMetadata": {},
+            "disableMemory": get_config("app.disable_memory"),
+            "forceSideBySide": False,
+            "isAsyncChat": False,
+            "disableSelfHarmShortCircuit": False,
+            "collectionIds": [],
+            "disabledConnectorIds": [],
+            "deviceEnvInfo": {
+                "darkModeEnabled": False,
+                "devicePixelRatio": 1,
+                "screenHeight": 900,
+                "screenWidth": 1365,
+                "viewportHeight": 900,
+                "viewportWidth": 1365,
+            },
+            "modeId": "fast" if use_fast_mode else "auto",
+            "linkQuery": False,
             "toolOverrides": tool_overrides or {},
         }
 
-        # When model is None or empty, use modeId-based routing ("auto")
-        # instead of explicit modelName/modelMode — matches Grok website behavior.
-        if model:
+        # The current Grok web app routes normal Fast chat via modeId instead of
+        # explicit modelName/modelMode. Keep legacy fields only for non-Fast modes.
+        if model and not use_fast_mode:
             payload["modelName"] = model
             payload["modelMode"] = mode
             payload["responseMetadata"] = {
                 "requestModelDetails": {"modelId": model},
             }
-        else:
-            payload["modeId"] = "auto"
-            payload["responseMetadata"] = {}
 
         if model == "grok-420":
             payload["enable420"] = True
@@ -229,6 +257,8 @@ class AppChatReverse:
                 origin="https://grok.com",
                 referer="https://grok.com/",
             )
+            _apply_app_chat_browser_headers(headers)
+            headers["Cookie"] = _build_base_sso_cookie(token)
 
             # Build payload
             payload = AppChatReverse.build_payload(
@@ -278,6 +308,28 @@ class AppChatReverse:
                     _log_proxy_state_once(base_proxy, normalized_proxy, scheme)
                 else:
                     _log_proxy_state_once("")
+                warmup_headers = {
+                    key: value
+                    for key, value in headers.items()
+                    if key.lower()
+                    in {
+                        "accept-language",
+                        "cookie",
+                        "referer",
+                        "sec-ch-ua",
+                        "sec-ch-ua-mobile",
+                        "sec-ch-ua-platform",
+                        "user-agent",
+                    }
+                }
+                await session.get(
+                    GROK_HOME,
+                    headers=warmup_headers,
+                    timeout=min(timeout, 30),
+                    proxy=proxy,
+                    proxies=proxies,
+                    impersonate=browser,
+                )
                 response = await session.post(
                     CHAT_API,
                     headers=headers,
