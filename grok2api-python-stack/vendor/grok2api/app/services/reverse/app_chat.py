@@ -14,13 +14,16 @@ from app.core.proxy_pool import get_current_proxy_from, rotate_proxy, should_rot
 from app.core.exceptions import UpstreamException
 from app.services.token.service import TokenService
 from app.services.reverse.utils.headers import build_headers
+from app.services.reverse.utils.cf_refresh import trigger_cf_refresh_on_403 as _trigger_cf_refresh_on_403
 from app.services.reverse.utils.retry import extract_status_for_retry, retry_on_status
 
 CHAT_API = "https://grok.com/rest/app-chat/conversations/new"
+CONVERSATIONS_API = "https://grok.com/rest/app-chat/conversations"
+RESPONSES_API_TEMPLATE = (
+    "https://grok.com/rest/app-chat/conversations/{conversation_id}/responses"
+)
 GROK_HOME = "https://grok.com/"
 _LAST_PROXY_LOG_STATE: tuple[str, str] | None = None
-
-from app.services.reverse.utils.cf_refresh import trigger_cf_refresh_on_403 as _trigger_cf_refresh_on_403
 
 
 def _normalize_chat_proxy(proxy_url: str) -> str:
@@ -80,6 +83,28 @@ def _apply_app_chat_browser_headers(headers: Dict[str, str]) -> None:
 
 class AppChatReverse:
     """/rest/app-chat/conversations/new reverse interface."""
+
+    @staticmethod
+    def _build_app_chat_headers(token: str) -> Dict[str, str]:
+        headers = build_headers(
+            cookie_token=token,
+            content_type="application/json",
+            origin="https://grok.com",
+            referer="https://grok.com/",
+        )
+        # app-chat is stricter than other REST endpoints. The current web
+        # client warms the session, then sends app-chat POSTs with SSO identity
+        # and without the global CF cookie bundle or high-entropy hints.
+        headers["Cookie"] = _build_base_sso_cookie(token)
+        for key in (
+            "Baggage",
+            "Priority",
+            "Sec-Ch-Ua-Arch",
+            "Sec-Ch-Ua-Bitness",
+            "Sec-Ch-Ua-Model",
+        ):
+            headers.pop(key, None)
+        return headers
 
     @staticmethod
     async def _read_error_body(response: Any) -> str:
@@ -142,6 +167,9 @@ class AppChatReverse:
     ) -> Dict[str, Any]:
         """Build chat payload for Grok app-chat API."""
 
+        if request_overrides and isinstance(request_overrides.get("__raw_payload"), dict):
+            return dict(request_overrides["__raw_payload"])
+
         attachments = file_attachments or []
         use_fast_mode = model == "grok-3" or mode == "MODEL_MODE_FAST"
 
@@ -202,6 +230,10 @@ class AppChatReverse:
         if request_overrides:
             payload.update({k: v for k, v in request_overrides.items() if v is not None})
 
+        if payload.get("modelName") in {"imagine-image-edit", "imagine-image-gen"}:
+            payload.pop("modelMode", None)
+            payload.pop("modeId", None)
+
         import json
         logger.debug(f"AppChatReverse payload: {json.dumps(payload, indent=4, ensure_ascii=False)}")
 
@@ -235,30 +267,7 @@ class AppChatReverse:
             Any: The response from the request.
         """
         try:
-            # Get proxies
-            base_proxy = get_config("proxy.base_proxy_url")
-            proxy = None
-            proxies = None
-            if base_proxy:
-                normalized_proxy = _normalize_chat_proxy(base_proxy)
-                scheme = urlparse(normalized_proxy).scheme.lower()
-                if scheme.startswith("socks"):
-                    # curl_cffi 对 SOCKS 代理优先使用 proxy 参数，避免被按 HTTP CONNECT 处理
-                    proxy = normalized_proxy
-                else:
-                    proxies = {"http": normalized_proxy, "https": normalized_proxy}
-                _log_proxy_state_once(base_proxy, normalized_proxy, scheme)
-            else:
-                _log_proxy_state_once("")
-            # Build headers
-            headers = build_headers(
-                cookie_token=token,
-                content_type="application/json",
-                origin="https://grok.com",
-                referer="https://grok.com/",
-            )
-            _apply_app_chat_browser_headers(headers)
-            headers["Cookie"] = _build_base_sso_cookie(token)
+            headers = AppChatReverse._build_app_chat_headers(token)
 
             # Build payload
             payload = AppChatReverse.build_payload(
@@ -411,6 +420,196 @@ class AppChatReverse:
             )
             raise UpstreamException(
                 message=f"AppChatReverse: Chat failed, {str(e)}",
+                details={"status": 502, "error": str(e)},
+            )
+
+    @staticmethod
+    async def request_imagine_response(
+        session: AsyncSession,
+        token: str,
+        message: str,
+        *,
+        image_attachments: List[str] = None,
+        file_attachments: List[str] = None,
+        n: int = 1,
+        mode_id: str = "fast",
+        tool_overrides: Dict[str, Any] = None,
+    ) -> Any:
+        """Create an Imagine conversation and add a response with image refs.
+
+        Grok's current Imagine web client does not send edit requests through
+        /conversations/new. It creates an empty conversation, then streams
+        /conversations/{conversationId}/responses with imageAttachments.
+        """
+        try:
+            headers = AppChatReverse._build_app_chat_headers(token)
+            timeout = float(get_config("chat.timeout") or 0)
+            if timeout <= 0:
+                timeout = max(
+                    float(get_config("video.timeout") or 0),
+                    float(get_config("image.timeout") or 0),
+                )
+            browser = get_config("proxy.browser")
+            active_proxy_key = None
+
+            async def _do_request():
+                nonlocal active_proxy_key
+                active_proxy_key, base_proxy = get_current_proxy_from("proxy.base_proxy_url")
+                proxy = None
+                proxies = None
+                if base_proxy:
+                    normalized_proxy = _normalize_chat_proxy(base_proxy)
+                    scheme = urlparse(normalized_proxy).scheme.lower()
+                    if scheme.startswith("socks"):
+                        proxy = normalized_proxy
+                    else:
+                        proxies = {"http": normalized_proxy, "https": normalized_proxy}
+                    _log_proxy_state_once(base_proxy, normalized_proxy, scheme)
+                else:
+                    _log_proxy_state_once("")
+
+                warmup_headers = {
+                    key: value
+                    for key, value in headers.items()
+                    if key.lower()
+                    in {
+                        "accept-language",
+                        "cookie",
+                        "referer",
+                        "sec-ch-ua",
+                        "sec-ch-ua-mobile",
+                        "sec-ch-ua-platform",
+                        "user-agent",
+                    }
+                }
+                await session.get(
+                    GROK_HOME,
+                    headers=warmup_headers,
+                    timeout=min(timeout, 30),
+                    proxy=proxy,
+                    proxies=proxies,
+                    impersonate=browser,
+                )
+
+                create_payload = {"systemPromptName": "", "temporary": False}
+                create_response = await session.post(
+                    CONVERSATIONS_API,
+                    headers=headers,
+                    data=orjson.dumps(create_payload),
+                    timeout=timeout,
+                    proxy=proxy,
+                    proxies=proxies,
+                    impersonate=browser,
+                )
+                if create_response.status_code != 200:
+                    content = await AppChatReverse._read_error_body(create_response)
+                    logger.error(
+                        "AppChatReverse: Imagine conversation create failed, {}, body={}",
+                        create_response.status_code,
+                        content[:500],
+                        extra={"error_type": "UpstreamException"},
+                    )
+                    raise UpstreamException(
+                        message=(
+                            "AppChatReverse: Imagine conversation create failed, "
+                            f"{create_response.status_code}"
+                        ),
+                        details={
+                            "status": create_response.status_code,
+                            "body": content,
+                        },
+                    )
+
+                conversation = create_response.json()
+                conversation_id = conversation.get("conversationId") or conversation.get("id")
+                if not conversation_id:
+                    raise UpstreamException(
+                        message="AppChatReverse: Imagine conversation missing id",
+                        details={"status": 502},
+                    )
+
+                payload = {
+                    "message": message,
+                    "modeId": mode_id or "fast",
+                    "parentResponseId": "",
+                    "enableImageGeneration": True,
+                    "enableImageStreaming": True,
+                    "sendFinalMetadata": True,
+                    "disableMemory": False,
+                    "disableSearch": False,
+                    "disableTextFollowUps": True,
+                    "enableSideBySide": False,
+                    "imageAttachments": image_attachments or [],
+                    "fileAttachments": file_attachments or [],
+                    "skipCancelCurrentInflightRequests": False,
+                    "imageGenerationCount": max(1, int(n or 1)),
+                }
+                if tool_overrides:
+                    payload["toolOverrides"] = tool_overrides
+
+                response = await session.post(
+                    RESPONSES_API_TEMPLATE.format(conversation_id=conversation_id),
+                    headers=headers,
+                    data=orjson.dumps(payload),
+                    timeout=timeout,
+                    stream=True,
+                    proxy=proxy,
+                    proxies=proxies,
+                    impersonate=browser,
+                )
+                if response.status_code != 200:
+                    content = await AppChatReverse._read_error_body(response)
+                    logger.error(
+                        "AppChatReverse: Imagine response failed, {}, body={}",
+                        response.status_code,
+                        content[:500],
+                        extra={"error_type": "UpstreamException"},
+                    )
+                    raise UpstreamException(
+                        message=(
+                            "AppChatReverse: Imagine response failed, "
+                            f"{response.status_code}"
+                        ),
+                        details={"status": response.status_code, "body": content},
+                    )
+                return response
+
+            def extract_status(e: Exception) -> Optional[int]:
+                status = extract_status_for_retry(e)
+                if status == 429:
+                    return None
+                return status
+
+            async def _on_retry(attempt: int, status_code: int, error: Exception, delay: float):
+                if active_proxy_key and should_rotate_proxy(status_code):
+                    rotate_proxy(active_proxy_key)
+                if status_code == 403:
+                    await _trigger_cf_refresh_on_403()
+
+            response = await retry_on_status(
+                _do_request,
+                extract_status=extract_status,
+                on_retry=_on_retry,
+            )
+
+            async def stream_response():
+                try:
+                    async for line in response.aiter_lines():
+                        yield line
+                finally:
+                    await session.close()
+
+            return stream_response()
+
+        except Exception as e:
+            if isinstance(e, UpstreamException):
+                raise
+            logger.error(
+                f"AppChatReverse: Imagine response failed, {str(e)}",
+                extra={"error_type": type(e).__name__},
+            )
+            raise UpstreamException(
+                message=f"AppChatReverse: Imagine response failed, {str(e)}",
                 details={"status": 502, "error": str(e)},
             )
 

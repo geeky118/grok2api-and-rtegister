@@ -3,12 +3,10 @@ Grok image edit service.
 """
 
 import asyncio
-import os
-import random
 import re
 import time
 from dataclasses import dataclass
-from typing import AsyncGenerator, AsyncIterable, Dict, List, Tuple, Union, Any
+from typing import AsyncGenerator, AsyncIterable, Dict, List, Union, Any
 
 import orjson
 from curl_cffi.requests.errors import RequestsError
@@ -211,6 +209,7 @@ class ImageEditService:
     def _build_request_overrides(n: int) -> Dict[str, Any]:
         return {
             "imageGenerationCount": max(1, int(n or 1)),
+            "disableSearch": True,
             "enableNsfw": bool(get_config("image.nsfw")),
         }
 
@@ -262,7 +261,7 @@ class ImageEditService:
 
             tried_tokens.add(current_token)
             try:
-                file_attachments = await self._upload_images(images, current_token)
+                image_references = await self._upload_images(images, current_token)
                 tool_overrides: Dict[str, Any] = {
                     "gmailSearch": False,
                     "googleCalendarSearch": False,
@@ -270,21 +269,13 @@ class ImageEditService:
                     "outlookCalendarSearch": False,
                     "googleDriveSearch": False,
                 }
-                request_overrides = self._build_request_overrides(n)
-                request_overrides["modeId"] = "fast"
-                request_overrides["disableMemory"] = False
-                request_overrides["temporary"] = False
-
                 if stream:
-                    response = await GrokChatService().chat(
+                    response = await self._request_imagine_edit(
                         token=current_token,
-                        message=prompt,
-                        model=None,
-                        mode=None,
-                        stream=True,
-                        file_attachments=file_attachments,
+                        prompt=prompt,
+                        n=n,
+                        image_references=image_references,
                         tool_overrides=tool_overrides,
-                        request_overrides=request_overrides,
                     )
                     processor = ImageStreamProcessor(
                         model_info.model_id,
@@ -308,7 +299,7 @@ class ImageEditService:
                     prompt=prompt,
                     n=n,
                     response_format=response_format,
-                    file_attachments=file_attachments,
+                    image_references=image_references,
                     tool_overrides=tool_overrides,
                 )
                 try:
@@ -355,24 +346,94 @@ class ImageEditService:
     async def _upload_images(
         self, images: List[str], token: str
     ) -> List[str]:
-        file_attachments: List[str] = []
+        image_references: List[str] = []
         upload_service = UploadService()
         try:
             for image in images:
-                file_id, _ = await upload_service.upload_file(image, token)
-                if file_id:
-                    file_attachments.append(file_id)
+                file_id, file_uri = await upload_service.upload_file(image, token)
+                reference = self._normalize_uploaded_reference(file_id, file_uri)
+                if reference:
+                    image_references.append(reference)
         finally:
             await upload_service.close()
 
-        if not file_attachments:
+        if not image_references:
             raise AppException(
                 message="Image upload failed",
                 error_type=ErrorType.SERVER.value,
                 code="upload_failed",
             )
 
-        return file_attachments
+        return image_references
+
+    @staticmethod
+    def _normalize_uploaded_reference(file_id: str, file_uri: str) -> str:
+        value = (file_uri or "").strip() or (file_id or "").strip()
+        if not value:
+            return ""
+        lower = value.lower()
+        if lower.startswith("http://") or lower.startswith("https://"):
+            return value
+        if value.startswith("/"):
+            return f"https://assets.grok.com{value}"
+        if "/" in value:
+            return f"https://assets.grok.com/{value.lstrip('/')}"
+        return value
+
+    @staticmethod
+    def _build_image_edit_overrides(
+        prompt: str, image_references: List[str], n: int
+    ) -> Dict[str, Any]:
+        payload = {
+            "modelName": "imagine-image-edit",
+            "temporary": True,
+            "message": prompt,
+            "returnImageBytes": False,
+            "returnRawGrokInXaiRequest": False,
+            "enableImageGeneration": True,
+            "enableImageStreaming": True,
+            "imageGenerationCount": max(1, int(n or 1)),
+            "forceConcise": False,
+            "enableSideBySide": True,
+            "sendFinalMetadata": True,
+            "isReasoning": False,
+            "disableTextFollowUps": True,
+            "disableMemory": False,
+            "forceSideBySide": False,
+            "responseMetadata": {
+                "modelConfigOverride": {
+                    "modelMap": {
+                        "imageEditModelConfig": {
+                            "imageReferences": image_references,
+                        },
+                        "imageEditModel": "imagine",
+                    }
+                }
+            },
+        }
+        return {"__raw_payload": payload}
+
+    async def _request_imagine_edit(
+        self,
+        *,
+        token: str,
+        prompt: str,
+        n: int,
+        image_references: List[str],
+        tool_overrides: dict,
+    ) -> AsyncIterable[bytes]:
+        return await GrokChatService().chat(
+            token=token,
+            message=prompt,
+            model=None,
+            mode=None,
+            stream=True,
+            file_attachments=[],
+            tool_overrides=tool_overrides,
+            request_overrides=self._build_image_edit_overrides(
+                prompt, image_references, n
+            ),
+        )
 
     async def _collect_images(
         self,
@@ -381,26 +442,19 @@ class ImageEditService:
         prompt: str,
         n: int,
         response_format: str,
-        file_attachments: List[str],
+        image_references: List[str],
         tool_overrides: dict,
     ) -> List[str]:
-        per_call = 2
+        per_call = 1
         calls_needed = max(1, (n + per_call - 1) // per_call)
 
         async def _call_edit():
-            edit_overrides = self._build_request_overrides(per_call)
-            edit_overrides["modeId"] = "fast"
-            edit_overrides["disableMemory"] = False
-            edit_overrides["temporary"] = False
-            response = await GrokChatService().chat(
+            response = await self._request_imagine_edit(
                 token=token,
-                message=prompt,
-                model=None,
-                mode=None,
-                stream=True,
-                file_attachments=file_attachments,
+                prompt=prompt,
+                n=per_call,
+                image_references=image_references,
                 tool_overrides=tool_overrides,
-                request_overrides=edit_overrides,
             )
             processor = ImageCollectProcessor(
                 "grok-imagine-1.0-edit", token, response_format=response_format
@@ -409,9 +463,16 @@ class ImageEditService:
 
         last_error: Exception | None = None
         rate_limit_error: Exception | None = None
+        all_images: List[str] = []
 
         if calls_needed == 1:
-            all_images = await _call_edit()
+            try:
+                all_images = await _call_edit()
+            except Exception as error:
+                logger.warning(f"Image edit call failed: {error}")
+                last_error = error
+                if rate_limited(error):
+                    rate_limit_error = error
         else:
             tasks = [_call_edit() for _ in range(calls_needed)]
             results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -419,7 +480,7 @@ class ImageEditService:
             all_images: List[str] = []
             for result in results:
                 if isinstance(result, Exception):
-                    logger.error(f"Concurrent call failed: {result}")
+                    logger.error(f"Concurrent image edit call failed: {result}")
                     last_error = result
                     if rate_limited(result):
                         rate_limit_error = result
@@ -500,11 +561,34 @@ class ImageStreamProcessor(BaseProcessor):
                 if img := resp.get("streamingImageGenerationResponse"):
                     image_index = img.get("imageIndex", 0)
                     progress = img.get("progress", 0)
+                    image_url = _normalize_grok_image_url(img.get("imageUrl"))
 
                     if self.n == 1 and image_index != self.target_index:
                         continue
 
                     out_index = 0 if self.n == 1 else image_index
+
+                    if image_url and float(progress or 0) >= 100:
+                        if image_url not in final_images:
+                            if self.response_format == "url":
+                                processed = await self.process_url(image_url, "image")
+                                if processed:
+                                    final_images.append(processed)
+                            else:
+                                try:
+                                    dl_service = self._get_dl()
+                                    base64_data = await dl_service.parse_b64(
+                                        image_url, self.token, "image"
+                                    )
+                                    if base64_data:
+                                        b64 = base64_data.split(",", 1)[1] if "," in base64_data else base64_data
+                                        final_images.append(b64)
+                                except Exception as e:
+                                    logger.warning(f"Failed to convert stream image to base64: {e}")
+                                    processed = await self.process_url(image_url, "image")
+                                    if processed:
+                                        final_images.append(processed)
+                        continue
 
                     if not self.chat_format:
                         image_id = self._get_image_id(image_index)
@@ -714,6 +798,34 @@ class ImageCollectProcessor(BaseProcessor):
                 resp = data.get("result", {}).get("response", {})
                 if isinstance(resp, dict):
                     seen_resp_keys.update(str(key) for key in resp.keys())
+                if img := resp.get("streamingImageGenerationResponse"):
+                    if isinstance(img, dict):
+                        seen_card_shapes.add(
+                            "streamingImageGenerationResponse="
+                            f"{sorted(str(key) for key in img.keys())};"
+                            f"progress={img.get('progress')}"
+                        )
+                        progress = img.get("progress")
+                        url = _normalize_grok_image_url(img.get("imageUrl"))
+                        if url and float(progress or 0) >= 100 and url not in images:
+                            if self.response_format == "url":
+                                processed = await self.process_url(url, "image")
+                                if processed:
+                                    images.append(processed)
+                            else:
+                                try:
+                                    dl_service = self._get_dl()
+                                    base64_data = await dl_service.parse_b64(
+                                        url, self.token, "image"
+                                    )
+                                    if base64_data:
+                                        b64 = base64_data.split(",", 1)[1] if "," in base64_data else base64_data
+                                        images.append(b64)
+                                except Exception as e:
+                                    logger.warning(f"Failed to convert streaming image to base64: {e}")
+                                    processed = await self.process_url(url, "image")
+                                    if processed:
+                                        images.append(processed)
                 # Handle cardAttachment-based image generation/edit (new Grok format)
                 if ca := resp.get("cardAttachment"):
                     try:

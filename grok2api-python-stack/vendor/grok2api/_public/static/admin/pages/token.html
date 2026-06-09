@@ -30,6 +30,15 @@
           <p class="text-[var(--accents-4)] mt-1 text-sm" data-i18n="token.subtitle">管理 Grok2API 的 Token 服务号池。</p>
         </div>
         <div class="flex items-center gap-3">
+          <button onclick="openGenerateModal()" class="geist-button-outline gap-2">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+              stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 2v20"></path>
+              <path d="m17 5-5-3-5 3"></path>
+              <path d="m17 19-5 3-5-3"></path>
+            </svg>
+            <span data-i18n="token.generate">生成</span>
+          </button>
           <button onclick="openImportModal()" class="geist-button-outline gap-2">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
               stroke-linecap="round" stroke-linejoin="round">
@@ -231,6 +240,31 @@
     </div>
   </div>
 
+
+  <!-- Generate Modal -->
+  <div id="generate-modal" class="modal-overlay hidden">
+    <div class="modal-content modal-md" id="generate-modal-content">
+      <div class="modal-header">
+        <h3 class="modal-title" data-i18n="token.generateTitle">生成 Token</h3>
+        <button onclick="closeGenerateModal()" class="modal-close">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="18" y1="6" x2="6" y2="18"></line>
+            <line x1="6" y1="6" x2="18" y2="18"></line>
+          </svg>
+        </button>
+      </div>
+      <div class="space-y-4">
+        <div>
+          <label class="modal-label mb-1 block" data-i18n="token.generateCount">生成数量</label>
+          <input type="number" id="generate-count" class="geist-input" min="1" max="1000" step="1" value="1">
+        </div>
+        <div class="flex justify-end gap-2 pt-2">
+          <button onclick="closeGenerateModal()" class="geist-button-outline text-xs px-3" data-i18n="common.cancel">取消</button>
+          <button id="generate-submit" onclick="submitGenerate()" class="geist-button text-xs px-3" data-i18n="token.startGenerate">开始生成</button>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <!-- Import Modal -->
   <div id="import-modal" class="modal-overlay hidden">

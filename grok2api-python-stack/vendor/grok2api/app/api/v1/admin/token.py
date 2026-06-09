@@ -4,6 +4,7 @@ import re
 import orjson
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
 
 from app.core.auth import get_app_key, verify_app_key
 from app.core.batch import create_task, expire_task, get_task
@@ -11,6 +12,7 @@ from app.core.logger import logger
 from app.core.storage import get_storage
 from app.services.grok.batch_services.usage import UsageService
 from app.services.grok.batch_services.nsfw import NSFWService
+from app.services.grok_register.scheduler import create_manual_task
 from app.services.token.manager import get_token_manager
 
 router = APIRouter()
@@ -32,6 +34,10 @@ _TOKEN_CHAR_REPLACEMENTS = str.maketrans(
         "\ufeff": "",
     }
 )
+
+
+class TokenGenerateRequest(BaseModel):
+    count: int = Field(ge=1, le=1000)
 
 
 def _sanitize_token_text(value) -> str:
@@ -131,6 +137,29 @@ async def update_tokens(data: dict):
         return {"status": "success", "message": "Token 已更新"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/tokens/generate", dependencies=[Depends(verify_app_key)])
+async def generate_tokens(data: TokenGenerateRequest):
+    """手动创建 grok-register 注册任务"""
+    result = await create_manual_task(data.count)
+    status = result.get("status")
+    if status == "missing_task_api_url":
+        raise HTTPException(
+            status_code=400,
+            detail="grok_register.task_api_url is not configured",
+        )
+    if status == "active_register_task_exists":
+        raise HTTPException(
+            status_code=409,
+            detail="An active grok-register task already exists",
+        )
+    if status == "error":
+        raise HTTPException(
+            status_code=502,
+            detail=result.get("error") or "Task creation failed",
+        )
+    return result
 
 
 @router.post("/tokens/refresh", dependencies=[Depends(verify_app_key)])

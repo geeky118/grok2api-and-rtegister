@@ -767,6 +767,55 @@ async function syncToServer() {
 }
 
 // Import Logic
+function openGenerateModal() {
+  const input = byId('generate-count');
+  if (input) input.value = '1';
+  openModal('generate-modal');
+}
+
+function closeGenerateModal() {
+  closeModal('generate-modal');
+}
+
+async function submitGenerate() {
+  const input = byId('generate-count');
+  const submitBtn = byId('generate-submit');
+  const count = parseInt(input?.value || '0', 10);
+  if (!Number.isInteger(count) || count < 1 || count > 1000) {
+    showToast(t('token.generateCountInvalid'), 'error');
+    return;
+  }
+
+  if (submitBtn) {
+    submitBtn.disabled = true;
+    submitBtn.textContent = t('common.sending');
+  }
+  try {
+    const res = await fetch('/v1/admin/tokens/generate', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...buildAuthHeaders(apiKey)
+      },
+      body: JSON.stringify({ count })
+    });
+    const data = await readJsonResponse(res);
+    if (!res.ok) {
+      const detail = data?.detail || `HTTP ${res.status}`;
+      throw new Error(detail);
+    }
+    closeGenerateModal();
+    showToast(t('token.generateTaskCreated', { count }), 'success');
+  } catch (e) {
+    showToast(t('token.generateFailed', { msg: e.message }), 'error');
+  } finally {
+    if (submitBtn) {
+      submitBtn.disabled = false;
+      submitBtn.textContent = t('token.startGenerate');
+    }
+  }
+}
+
 function openImportModal() {
   openModal('import-modal');
 }

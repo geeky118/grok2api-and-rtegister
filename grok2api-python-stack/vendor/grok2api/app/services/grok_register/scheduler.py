@@ -21,6 +21,7 @@ DEFAULT_REQUEST_TIMEOUT_SECONDS = 15
 DEFAULT_POOL_NAMES = ["ssoBasic", "ssoSuper"]
 ACTIVE_TASK_STATUSES = {"queued", "running", "stopping"}
 AUTO_NOTE_MARKER = "auto:grok2api-low-account-watermark"
+MANUAL_NOTE_MARKER = "manual:grok2api-token-page"
 
 _task: Optional[asyncio.Task] = None
 _last_trigger_at = 0.0
@@ -141,6 +142,49 @@ async def _create_register_task(
         threshold,
     )
     return data if isinstance(data, dict) else {"data": data}
+
+
+async def create_manual_task(task_count: int) -> dict[str, Any]:
+    """Create a grok-register task on explicit admin request."""
+    task_api_url = _get_task_api_url()
+    if not task_api_url:
+        return {"status": "missing_task_api_url"}
+
+    task_count = max(1, int(task_count))
+    timeout_seconds = _get_int(
+        "grok_register.request_timeout_seconds",
+        DEFAULT_REQUEST_TIMEOUT_SECONDS,
+        minimum=1,
+    )
+    timeout = aiohttp.ClientTimeout(total=timeout_seconds)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        name = f"grok2api-manual-register-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+        payload = {
+            "name": name,
+            "count": task_count,
+            "notes": f"{MANUAL_NOTE_MARKER}; source=admin-token-page",
+        }
+        async with session.post(task_api_url, json=payload) as response:
+            text = await response.text()
+            if response.status < 200 or response.status >= 300:
+                return {
+                    "status": "error",
+                    "error": f"HTTP {response.status}: {text[:500]}",
+                }
+            try:
+                data = await response.json(content_type=None)
+            except Exception:
+                data = {"raw": text}
+
+    logger.warning(
+        "grok-register manual trigger: created register task name={}, count={}",
+        name,
+        task_count,
+    )
+    return {
+        "status": "triggered",
+        "task": data.get("task", data) if isinstance(data, dict) else data,
+    }
 
 
 async def check_once() -> dict[str, Any]:

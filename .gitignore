@@ -34,6 +34,20 @@ __pycache__/
 **/.env.*
 !.env.example
 !**/.env.example
+*.env.local
+*.env.production
+*.env.prod
+*.env.server
+grok.env
+**/grok.env
+
+# Local deployment credentials
+deploy.local.*
+scripts/deploy_app_chat_fix.py
+*.pem
+*.key
+id_rsa*
+id_ed25519*
 
 # IDE
 .idea/
