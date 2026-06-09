@@ -832,7 +832,7 @@ class StreamProcessor(proc_base.BaseProcessor):
                         self.think_opened = False
                         self.think_closed_once = True
                     self.image_think_active = False
-                    for url in proc_base._collect_images(mr):
+                    for url in proc_base._collect_final_images(mr):
                         parts = url.split("/")
                         img_id = parts[-2] if len(parts) >= 2 else "image"
                         dl_service = self._get_dl()
@@ -858,10 +858,11 @@ class StreamProcessor(proc_base.BaseProcessor):
                         except orjson.JSONDecodeError:
                             card_data = None
                         if isinstance(card_data, dict):
-                            image = card_data.get("image") or {}
-                            original = image.get("original")
-                            title = image.get("title") or ""
-                            if original:
+                            image_item = proc_base._card_attachment_image(
+                                {"jsonData": card_data}
+                            )
+                            if image_item:
+                                title, original = image_item
                                 title_safe = title.replace("\n", " ").strip()
                                 if title_safe:
                                     self._record_content(f"![{title_safe}]({original})\n")
@@ -1070,11 +1071,12 @@ class CollectProcessor(proc_base.BaseProcessor):
                         if not isinstance(card_data, dict):
                             continue
                         card_id = card_data.get("id")
-                        image = card_data.get("image") or {}
-                        original = image.get("original")
-                        if not card_id or not original:
+                        image_item = proc_base._card_attachment_image(
+                            {"jsonData": card_data}
+                        )
+                        if not card_id or not image_item:
                             continue
-                        title = image.get("title") or ""
+                        title, original = image_item
                         card_map[card_id] = (title, original)
 
                     if content and card_map:
@@ -1099,7 +1101,7 @@ class CollectProcessor(proc_base.BaseProcessor):
                             flags=re.DOTALL,
                         )
 
-                    if urls := proc_base._collect_images(mr):
+                    if urls := proc_base._collect_final_images(mr):
                         content += "\n"
                         for url in urls:
                             parts = url.split("/")

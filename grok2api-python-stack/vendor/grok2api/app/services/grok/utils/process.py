@@ -3,8 +3,11 @@
 """
 
 import asyncio
+import re
 import time
 from typing import Any, AsyncGenerator, Optional, AsyncIterable, List, TypeVar
+
+import orjson
 
 from app.core.config import get_config
 from app.core.logger import logger
@@ -68,6 +71,89 @@ def _collect_images(obj: Any) -> List[str]:
 
     walk(obj)
     return urls
+
+
+def _is_preview_image_url(url: str) -> bool:
+    lower = (url or "").lower()
+    return (
+        bool(re.search(r"(^|[-_/])part[-_/]?\d+($|[./?_#-])", lower))
+        or any(
+            marker in lower
+            for marker in (
+                "thumbnail",
+                "thumb",
+                "preview",
+                "partial",
+                "intermediate",
+            )
+        )
+    )
+
+
+def _only_final_image_urls(urls: List[str]) -> List[str]:
+    result: List[str] = []
+    seen = set()
+    for url in urls:
+        if not isinstance(url, str) or not url.strip():
+            continue
+        url = url.strip()
+        if url in seen or _is_preview_image_url(url):
+            continue
+        seen.add(url)
+        result.append(url)
+    return result
+
+
+def _card_payload(raw: Any) -> dict:
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, (str, bytes, bytearray)) and raw:
+        try:
+            payload = orjson.loads(raw)
+            return payload if isinstance(payload, dict) else {}
+        except orjson.JSONDecodeError:
+            return {}
+    return {}
+
+
+def _generated_card_is_final(payload: dict) -> bool:
+    card_type = payload.get("type")
+    if card_type not in {"render_generated_image", "render_edited_image"}:
+        return True
+    chunk = payload.get("image_chunk")
+    if not isinstance(chunk, dict):
+        return False
+    try:
+        return float(chunk.get("progress") or 0) >= 100
+    except (TypeError, ValueError):
+        return False
+
+
+def _card_attachment_image(card_attachment: Any) -> Optional[tuple[str, str]]:
+    if not isinstance(card_attachment, dict):
+        return None
+
+    payload = _card_payload(
+        card_attachment.get("jsonData") or card_attachment.get("json_data")
+    )
+    if payload and not _generated_card_is_final(payload):
+        return None
+
+    source = payload if payload else card_attachment
+    image = source.get("image") if isinstance(source, dict) else None
+    if not isinstance(image, dict):
+        return None
+    original = image.get("original")
+    if not isinstance(original, str) or not original.strip():
+        return None
+    if _is_preview_image_url(original):
+        return None
+    title = image.get("title") or ""
+    return str(title), original.strip()
+
+
+def _collect_final_images(obj: Any) -> List[str]:
+    return _only_final_image_urls(_collect_images(obj))
 
 
 async def _with_idle_timeout(
@@ -148,5 +234,7 @@ __all__ = [
     "_with_idle_timeout",
     "_normalize_line",
     "_collect_images",
+    "_collect_final_images",
+    "_card_attachment_image",
     "_is_http2_error",
 ]

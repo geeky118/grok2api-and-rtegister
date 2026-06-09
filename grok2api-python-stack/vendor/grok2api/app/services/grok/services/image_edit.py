@@ -195,13 +195,13 @@ def _response_image_urls(value: Any) -> List[str]:
 
 
 def _prefer_final_image_urls(urls: List[str]) -> List[str]:
-    def score(url: str) -> tuple[int, int, int]:
+    def is_intermediate(url: str) -> bool:
         lower = url.lower()
         is_partial = bool(re.search(r"(^|[-_/])part[-_/]?\d+($|[./?_#-])", lower))
         is_preview = any(marker in lower for marker in ("thumbnail", "thumb", "preview"))
-        return (1 if is_partial else 0, 1 if is_preview else 0, len(url))
+        return is_partial or is_preview
 
-    return sorted(urls, key=score)
+    return [url for url in urls if not is_intermediate(url)]
 
 
 class ImageEditService:

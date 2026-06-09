@@ -40,7 +40,7 @@ def _extract_browser_profile(user_agent: str) -> str:
     if match:
         major = int(match.group(1))
         if major >= 137:
-            return "chrome146"
+            return "chrome136"
         return f"chrome{major}"
     return "chrome120"
 
@@ -103,9 +103,9 @@ async def solve_cf_challenge() -> Optional[Dict[str, str]]:
         clearance = _extract_cookie_value(cookies, "cf_clearance")
         ua = _extract_user_agent(solution)
         browser = _extract_browser_profile(ua)
-        if browser == "chrome146":
+        if browser == "chrome136":
             import re
-            ua = re.sub(r"Chrome/\d+\.0\.0\.0", "Chrome/146.0.0.0", ua)
+            ua = re.sub(r"Chrome/\d+\.0\.0\.0", "Chrome/136.0.0.0", ua)
         logger.info(f"成功获取 cookies (数量: {len(cookies)}), 指纹: {browser}")
 
         return {

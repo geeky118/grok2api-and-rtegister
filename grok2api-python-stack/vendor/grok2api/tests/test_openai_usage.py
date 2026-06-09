@@ -20,10 +20,25 @@ def _decode_sse_json(chunk: str) -> dict:
     return orjson.loads(chunk[6:])
 
 
+def _chat_config(key, default=None):
+    if key == "chat.stream_timeout":
+        return 0
+    if key == "app.filter_tags":
+        return []
+    return default
+
+
+class _FakeDownloadService:
+    async def render_image(self, url: str, token: str, img_id: str) -> str:
+        return f"![image]({url})"
+
+    async def close(self):
+        pass
+
+
 def test_collect_processor_returns_estimated_usage(monkeypatch):
     monkeypatch.setattr(
-        "app.services.grok.services.chat.get_config",
-        lambda key, default=None: 0 if key == "chat.stream_timeout" else [],
+        "app.services.grok.services.chat.get_config", _chat_config
     )
 
     async def _run():
@@ -59,8 +74,7 @@ def test_collect_processor_returns_estimated_usage(monkeypatch):
 
 def test_stream_processor_final_chunk_has_usage(monkeypatch):
     monkeypatch.setattr(
-        "app.services.grok.services.chat.get_config",
-        lambda key, default=None: 0 if key == "chat.stream_timeout" else [],
+        "app.services.grok.services.chat.get_config", _chat_config
     )
 
     async def _run():
@@ -105,6 +119,140 @@ def test_stream_processor_final_chunk_has_usage(monkeypatch):
             == final_payload["usage"]["prompt_tokens"]
             + final_payload["usage"]["completion_tokens"]
         )
+
+    asyncio.run(_run())
+
+
+def test_stream_processor_filters_partial_image_edit_card(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.grok.services.chat.get_config", _chat_config
+    )
+    monkeypatch.setattr(
+        "app.services.grok.utils.process.BaseProcessor._get_dl",
+        lambda self: _FakeDownloadService(),
+    )
+
+    async def _run():
+        processor = StreamProcessor("grok-4")
+        partial_url = "https://assets.grok.com/generated/partial.png"
+        final_url = "https://assets.grok.com/generated/final.jpg"
+        chunks = []
+        async for chunk in processor.process(
+            _iter_lines(
+                [
+                    _json_line(
+                        {
+                            "result": {
+                                "response": {
+                                    "cardAttachment": {
+                                        "jsonData": orjson.dumps(
+                                            {
+                                                "type": "render_edited_image",
+                                                "image_chunk": {"progress": 40},
+                                                "image": {
+                                                    "title": "partial",
+                                                    "original": partial_url,
+                                                },
+                                            }
+                                        ).decode()
+                                    }
+                                }
+                            }
+                        }
+                    ),
+                    _json_line(
+                        {
+                            "result": {
+                                "response": {
+                                    "cardAttachment": {
+                                        "jsonData": orjson.dumps(
+                                            {
+                                                "type": "render_edited_image",
+                                                "image_chunk": {"progress": 100},
+                                                "image": {
+                                                    "title": "final",
+                                                    "original": final_url,
+                                                },
+                                            }
+                                        ).decode()
+                                    }
+                                }
+                            }
+                        }
+                    ),
+                ]
+            )
+        ):
+            chunks.append(chunk)
+
+        contents = [
+            _decode_sse_json(chunk)["choices"][0]["delta"].get("content", "")
+            for chunk in chunks
+            if chunk.startswith("data: {")
+        ]
+        assert not any(partial_url in content for content in contents)
+        assert any(final_url in content for content in contents)
+
+    asyncio.run(_run())
+
+
+def test_collect_processor_filters_partial_render_card(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.grok.services.chat.get_config", _chat_config
+    )
+
+    async def _run():
+        processor = CollectProcessor("grok-4")
+        partial_url = "https://assets.grok.com/generated/partial.png"
+        final_url = "https://assets.grok.com/generated/final.jpg"
+        result = await processor.process(
+            _iter_lines(
+                [
+                    _json_line(
+                        {
+                            "result": {
+                                "response": {
+                                    "modelResponse": {
+                                        "responseId": "resp_collect",
+                                        "message": (
+                                            '<grok:render card_id="partial_card"></grok:render>'
+                                            '<grok:render card_id="final_card"></grok:render>'
+                                        ),
+                                        "cardAttachmentsJson": [
+                                            orjson.dumps(
+                                                {
+                                                    "id": "partial_card",
+                                                    "type": "render_edited_image",
+                                                    "image_chunk": {"progress": 50},
+                                                    "image": {
+                                                        "title": "partial",
+                                                        "original": partial_url,
+                                                    },
+                                                }
+                                            ).decode(),
+                                            orjson.dumps(
+                                                {
+                                                    "id": "final_card",
+                                                    "type": "render_edited_image",
+                                                    "image_chunk": {"progress": 100},
+                                                    "image": {
+                                                        "title": "final",
+                                                        "original": final_url,
+                                                    },
+                                                }
+                                            ).decode(),
+                                        ],
+                                    },
+                                }
+                            }
+                        }
+                    )
+                ]
+            )
+        )
+        content = result["choices"][0]["message"]["content"]
+        assert partial_url not in content
+        assert final_url in content
 
     asyncio.run(_run())
 
