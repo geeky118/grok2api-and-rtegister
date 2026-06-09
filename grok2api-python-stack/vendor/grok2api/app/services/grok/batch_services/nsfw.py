@@ -17,10 +17,17 @@ from app.core.batch import run_batch
 
 _NSFW_SEMAPHORE = None
 _NSFW_SEM_VALUE = None
+_NSFW_STEP_LOCK = asyncio.Lock()
+
+
+def _upstream_status(err: UpstreamException) -> int:
+    if err.details and "status" in err.details:
+        return int(err.details["status"] or 0)
+    return int(getattr(err, "status_code", 0) or 0)
 
 
 def _get_nsfw_semaphore() -> asyncio.Semaphore:
-    value = max(1, int(get_config("nsfw.concurrent")))
+    value = min(2, max(1, int(get_config("nsfw.concurrent"))))
     global _NSFW_SEMAPHORE, _NSFW_SEM_VALUE
     if _NSFW_SEMAPHORE is None or value != _NSFW_SEM_VALUE:
         _NSFW_SEM_VALUE = value
@@ -39,24 +46,53 @@ class NSFWService:
         should_cancel: Optional[Callable[[], bool]] = None,
     ) -> Dict[str, Dict[str, Any]]:
         """Batch enable NSFW."""
-        batch_size = get_config("nsfw.batch_size")
+        batch_size = min(2, max(1, int(get_config("nsfw.batch_size"))))
+        interval_seconds = max(0.0, float(get_config("nsfw.interval_seconds", 10)))
+        retry_429_attempts = max(1, int(get_config("nsfw.retry_429_attempts", 3)))
+        retry_429_delay_seconds = max(
+            1.0, float(get_config("nsfw.retry_429_delay_seconds", 20))
+        )
+
+        async def _paced(call):
+            async with _NSFW_STEP_LOCK:
+                try:
+                    last_error = None
+                    for attempt in range(1, retry_429_attempts + 1):
+                        try:
+                            result = await call()
+                            return result
+                        except UpstreamException as e:
+                            last_error = e
+                            if (
+                                _upstream_status(e) != 429
+                                or attempt >= retry_429_attempts
+                            ):
+                                raise
+                            delay = retry_429_delay_seconds * attempt
+                            logger.warning(
+                                f"NSFW upstream 429, retrying step after {delay:.0f}s "
+                                f"({attempt}/{retry_429_attempts})"
+                            )
+                            await asyncio.sleep(delay)
+                    if last_error:
+                        raise last_error
+                finally:
+                    if interval_seconds:
+                        await asyncio.sleep(interval_seconds)
+
         async def _enable(token: str):
             try:
                 browser = get_config("proxy.browser")
                 async with ResettableSession(impersonate=browser) as session:
                     async def _record_fail(err: UpstreamException, reason: str):
-                        status = None
-                        if err.details and "status" in err.details:
-                            status = err.details["status"]
-                        else:
-                            status = getattr(err, "status_code", None)
+                        status = _upstream_status(err)
                         if status == 401:
                             await mgr.record_fail(token, status, reason)
-                        return status or 0
+                        return status
 
                     try:
                         async with _get_nsfw_semaphore():
-                            await AcceptTosReverse.request(session, token)
+                            await _paced(lambda: AcceptTosReverse.request(session, token))
                     except UpstreamException as e:
                         status = await _record_fail(e, "tos_auth_failed")
                         return {
@@ -67,18 +103,24 @@ class NSFWService:
 
                     try:
                         async with _get_nsfw_semaphore():
-                            await SetBirthReverse.request(session, token)
+                            await _paced(lambda: SetBirthReverse.request(session, token))
                     except UpstreamException as e:
                         status = await _record_fail(e, "set_birth_auth_failed")
-                        return {
-                            "success": False,
-                            "http_status": status,
-                            "error": f"Set birth date failed: {str(e)}",
-                        }
+                        if status == 429:
+                            logger.warning(
+                                "Set birth date rate limited; continuing NSFW enable "
+                                "because the account may already satisfy age requirements."
+                            )
+                        else:
+                            return {
+                                "success": False,
+                                "http_status": status,
+                                "error": f"Set birth date failed: {str(e)}",
+                            }
 
                     try:
                         async with _get_nsfw_semaphore():
-                            grpc_status = await NsfwMgmtReverse.request(session, token)
+                            grpc_status = await _paced(lambda: NsfwMgmtReverse.request(session, token))
                         success = grpc_status.code in (-1, 0)
                     except UpstreamException as e:
                         status = await _record_fail(e, "nsfw_mgmt_auth_failed")

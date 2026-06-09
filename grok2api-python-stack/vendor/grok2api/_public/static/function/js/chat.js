@@ -1294,10 +1294,11 @@
   }
 
   function buildPayload() {
+    const isImageModel = String(modelValue || '').startsWith('grok-imagine');
     const payload = {
       model: modelValue || 'grok-3',
       messages: buildMessages(),
-      stream: true,
+      stream: !isImageModel,
       temperature: Number(tempRange ? tempRange.value : 0.8),
       top_p: Number(topPRange ? topPRange.value : 0.95)
     };
@@ -1305,10 +1306,11 @@
   }
 
   function buildPayloadFrom(history) {
+    const isImageModel = String(modelValue || '').startsWith('grok-imagine');
     const payload = {
       model: modelValue || 'grok-3',
       messages: buildMessagesFrom(history),
-      stream: true,
+      stream: !isImageModel,
       temperature: Number(tempRange ? tempRange.value : 0.8),
       top_p: Number(topPRange ? topPRange.value : 0.95)
     };
@@ -1644,6 +1646,21 @@
 
   async function handleStream(res, assistantEntry, targetSessionId) {
     activeStreamInfo = { sessionId: targetSessionId, entry: assistantEntry };
+    const contentType = (res.headers.get('content-type') || '').toLowerCase();
+    if (contentType.includes('application/json')) {
+      try {
+        const json = await res.json();
+        const content = json && json.choices && json.choices[0] && json.choices[0].message
+          ? (json.choices[0].message.content || '')
+          : '';
+        updateMessage(assistantEntry, content, true);
+        assistantEntry.committed = true;
+        commitToSession(targetSessionId, content);
+      } finally {
+        activeStreamInfo = null;
+      }
+      return;
+    }
     const reader = res.body.getReader();
     const decoder = new TextDecoder('utf-8');
     let buffer = '';

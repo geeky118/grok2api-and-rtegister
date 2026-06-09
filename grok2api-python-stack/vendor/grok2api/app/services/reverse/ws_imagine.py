@@ -3,8 +3,10 @@ Reverse interface: Imagine WebSocket image stream.
 """
 
 import asyncio
+import base64
 import orjson
 import re
+import struct
 import time
 import uuid
 from typing import AsyncGenerator, Dict, Optional
@@ -36,10 +38,71 @@ class ImagineWebSocketReverse:
             return None, None
         return match.group(1), match.group(2).lower()
 
-    def _is_final_image(self, url: str, blob_size: int, final_min_bytes: int) -> bool:
-        # Final image must satisfy byte-size threshold to avoid tiny preview
-        # images being treated as final outputs.
-        return blob_size >= final_min_bytes
+    def _strip_base64_header(self, blob: str) -> str:
+        if "," in blob and "base64" in blob.split(",", 1)[0]:
+            return blob.split(",", 1)[1]
+        return blob
+
+    def _image_dimensions(self, blob: str) -> tuple[int, int]:
+        data = self._strip_base64_header(blob)
+        try:
+            raw = base64.b64decode(data, validate=False)
+        except Exception:
+            return 0, 0
+        if raw.startswith(b"\x89PNG\r\n\x1a\n") and len(raw) >= 24:
+            return struct.unpack(">II", raw[16:24])
+        if raw.startswith(b"\xff\xd8"):
+            offset = 2
+            while offset + 9 < len(raw):
+                if raw[offset] != 0xFF:
+                    offset += 1
+                    continue
+                marker = raw[offset + 1]
+                offset += 2
+                if marker in {0xD8, 0xD9}:
+                    continue
+                if offset + 2 > len(raw):
+                    break
+                segment_length = struct.unpack(">H", raw[offset : offset + 2])[0]
+                if segment_length < 2 or offset + segment_length > len(raw):
+                    break
+                if marker in {
+                    0xC0,
+                    0xC1,
+                    0xC2,
+                    0xC3,
+                    0xC5,
+                    0xC6,
+                    0xC7,
+                    0xC9,
+                    0xCA,
+                    0xCB,
+                    0xCD,
+                    0xCE,
+                    0xCF,
+                }:
+                    height, width = struct.unpack(">HH", raw[offset + 3 : offset + 7])
+                    return width, height
+                offset += segment_length
+        return 0, 0
+
+    def _is_final_image(self, url: str, blob: str, blob_size: int, final_min_bytes: int) -> bool:
+        # Grok also emits larger progressive previews. Require both bytes and
+        # dimensions so a blurry intermediate frame is not returned as final.
+        if blob_size < final_min_bytes:
+            return False
+        width, height = self._image_dimensions(blob)
+        min_edge = int(get_config("image.final_min_edge") or 384)
+        min_pixels = int(get_config("image.final_min_pixels") or 250000)
+        if not width or not height:
+            logger.warning(f"Image dimensions unavailable for url={url}; rejecting as non-final")
+            return False
+        if min(width, height) < min_edge or width * height < min_pixels:
+            logger.debug(
+                f"Rejecting non-final image candidate: url={url}, size={blob_size}, dimensions={width}x{height}"
+            )
+            return False
+        return True
 
     def _classify_image(self, url: str, blob: str, final_min_bytes: int, medium_min_bytes: int) -> Optional[Dict[str, object]]:
         if not url or not blob:
@@ -48,7 +111,7 @@ class ImagineWebSocketReverse:
         image_id, ext = self._parse_image_url(url)
         image_id = image_id or uuid.uuid4().hex
         blob_size = len(blob)
-        is_final = self._is_final_image(url, blob_size, final_min_bytes)
+        is_final = self._is_final_image(url, blob, blob_size, final_min_bytes)
 
         stage = (
             "final"

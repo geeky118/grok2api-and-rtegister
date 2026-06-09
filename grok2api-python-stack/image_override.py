@@ -5,6 +5,7 @@ Grok image services.
 import asyncio
 import base64
 import math
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,7 +18,7 @@ from app.core.logger import logger
 from app.core.storage import DATA_DIR
 from app.core.exceptions import AppException, ErrorType, UpstreamException
 from app.services.grok.utils.process import BaseProcessor
-from app.services.grok.utils.retry import pick_token, rate_limited
+from app.services.grok.utils.retry import pick_token, rate_limited, transient_upstream
 from app.services.grok.utils.response import make_response_id, make_chat_chunk, wrap_image_content
 from app.services.grok.utils.stream import wrap_stream_with_usage
 from app.services.grok.services.chat import GrokChatService
@@ -43,12 +44,81 @@ class ImageGenerationService:
     """Image generation orchestration service."""
 
     @staticmethod
+    def _is_empty_result(error: Exception) -> bool:
+        if not isinstance(error, UpstreamException):
+            return False
+        details = error.details or {}
+        marker = str(details.get("error") or error).lower()
+        return (
+            details.get("error") == "empty_result"
+            or "empty_result" in marker
+            or "returned no results" in marker
+            or "no valid final image" in marker
+        )
+
+    @staticmethod
+    def _is_retryable_image_error(error: Exception) -> bool:
+        if rate_limited(error) or transient_upstream(error):
+            return True
+        if not isinstance(error, UpstreamException):
+            return False
+        details = error.details or {}
+        status = details.get("status")
+        if status in {403, 408, 500, 502, 503, 504}:
+            return True
+        body = str(details.get("body") or "").lower()
+        if status == 403 and ("cloudflare" in body or "just a moment" in body):
+            return True
+        return ImageGenerationService._is_empty_result(error)
+
+    @staticmethod
+    def _fallback_prompt(prompt: str) -> str:
+        text = (prompt or "").strip()
+        if not text:
+            return "生成一张图片：清晰、完整、主体明确。"
+        lowered = text.lower()
+        generation_markers = (
+            "生成",
+            "画",
+            "绘制",
+            "create",
+            "generate",
+            "draw",
+            "make an image",
+        )
+        if any(marker in lowered for marker in generation_markers):
+            return text
+        return f"生成一张图片：{text}。主体清晰，画面完整，不要只回复文字。"
+
+    async def _record_retryable_failure(
+        self,
+        token_mgr: Any,
+        token: str,
+        error: UpstreamException,
+    ) -> None:
+        details = error.details or {}
+        status = details.get("status")
+        if status == 429 or rate_limited(error):
+            await token_mgr.mark_rate_limited(token)
+            return
+        reason = "image_generation_retryable"
+        if self._is_empty_result(error):
+            reason = "image_generation_empty_result"
+        elif status == 403:
+            reason = "image_generation_403"
+        try:
+            await token_mgr.record_fail(token, int(status or 502), reason=reason)
+        except Exception as exc:
+            logger.warning(f"Failed to record image retryable failure: {exc}")
+
+    @staticmethod
     def _app_chat_request_overrides(
         count: int,
         enable_nsfw: Optional[bool],
     ) -> Dict[str, Any]:
         overrides: Dict[str, Any] = {
             "imageGenerationCount": max(1, int(count or 1)),
+            "disableSearch": True,
         }
         if enable_nsfw is not None:
             overrides["enableNsfw"] = bool(enable_nsfw)
@@ -75,6 +145,7 @@ class ImageGenerationService:
         max_token_retries = max(int(get_config("retry.max_retry") or 3), 8)
         tried_tokens: set[str] = set()
         last_error: Optional[Exception] = None
+        use_fallback_prompt = False
 
         # resolve nsfw once for routing and upstream
         if enable_nsfw is None:
@@ -84,7 +155,7 @@ class ImageGenerationService:
         if stream:
 
             async def _stream_retry() -> AsyncGenerator[str, None]:
-                nonlocal last_error
+                nonlocal last_error, use_fallback_prompt
                 for attempt in range(max_token_retries):
                     preferred = token if (attempt == 0 and not prefer_tags) else None
                     current_token = await pick_token(
@@ -113,12 +184,15 @@ class ImageGenerationService:
 
                     tried_tokens.add(current_token)
                     yielded = False
+                    current_prompt = (
+                        self._fallback_prompt(prompt) if use_fallback_prompt else prompt
+                    )
                     try:
                         result = await self._stream_app_chat(
                             token_mgr=token_mgr,
                             token=current_token,
                             model_info=model_info,
-                            prompt=prompt,
+                            prompt=current_prompt,
                             n=n,
                             response_format=response_format,
                             enable_nsfw=enable_nsfw,
@@ -137,6 +211,37 @@ class ImageGenerationService:
                             logger.warning(
                                 f"Token {current_token[:10]}... rate limited (429), "
                                 f"trying next token (attempt {attempt + 1}/{max_token_retries})"
+                            )
+                            continue
+                        if self._is_retryable_image_error(e) and not yielded:
+                            if self._is_empty_result(e):
+                                try:
+                                    logger.warning(
+                                        "App-chat image stream returned no image; falling back to WS imagine"
+                                    )
+                                    ws_result = await self._stream_ws(
+                                        token_mgr=token_mgr,
+                                        token=current_token,
+                                        model_info=model_info,
+                                        prompt=current_prompt,
+                                        n=n,
+                                        response_format=response_format,
+                                        size=size,
+                                        aspect_ratio=aspect_ratio,
+                                        enable_nsfw=enable_nsfw,
+                                        chat_format=chat_format,
+                                    )
+                                    async for chunk in ws_result.data:
+                                        yielded = True
+                                        yield chunk
+                                    return
+                                except Exception as ws_error:
+                                    logger.warning(f"WS image stream fallback failed: {ws_error}")
+                                use_fallback_prompt = True
+                            await self._record_retryable_failure(token_mgr, current_token, e)
+                            logger.warning(
+                                f"Retryable image stream error for token {current_token[:10]}..., "
+                                f"trying next token (attempt {attempt + 1}/{max_token_retries}): {e}"
                             )
                             continue
                         raise
@@ -186,12 +291,13 @@ class ImageGenerationService:
                 )
 
             tried_tokens.add(current_token)
+            current_prompt = self._fallback_prompt(prompt) if use_fallback_prompt else prompt
             try:
                 return await self._collect_app_chat(
                     token_mgr=token_mgr,
                     token=current_token,
                     model_info=model_info,
-                    prompt=prompt,
+                    prompt=current_prompt,
                     n=n,
                     response_format=response_format,
                     enable_nsfw=enable_nsfw,
@@ -203,6 +309,33 @@ class ImageGenerationService:
                     logger.warning(
                         f"Token {current_token[:10]}... rate limited (429), "
                         f"trying next token (attempt {attempt + 1}/{max_token_retries})"
+                    )
+                    continue
+                if self._is_retryable_image_error(e):
+                    if self._is_empty_result(e):
+                        try:
+                            logger.warning(
+                                "App-chat image generation returned no image; falling back to WS imagine"
+                            )
+                            return await self._collect_ws(
+                                token_mgr=token_mgr,
+                                token=current_token,
+                                model_info=model_info,
+                                tried_tokens=tried_tokens,
+                                prompt=current_prompt,
+                                n=n,
+                                response_format=response_format,
+                                aspect_ratio=aspect_ratio,
+                                enable_nsfw=enable_nsfw,
+                            )
+                        except Exception as ws_error:
+                            logger.warning(f"WS image fallback failed: {ws_error}")
+                        use_fallback_prompt = True
+                    await self._record_retryable_failure(token_mgr, current_token, e)
+                    logger.warning(
+                        f"Retryable image generation error for token {current_token[:10]}..., "
+                        f"trying next token (attempt {attempt + 1}/{max_token_retries}, "
+                        f"fallback_prompt={use_fallback_prompt}): {e}"
                     )
                     continue
                 raise
@@ -278,11 +411,12 @@ class ImageGenerationService:
         chat_format: bool = False,
     ) -> ImageGenerationResult:
         overrides = self._app_chat_request_overrides(n, enable_nsfw)
+        overrides["modeId"] = "fast"
         response = await GrokChatService().chat(
             token=token,
             message=prompt,
-            model=model_info.grok_model,
-            mode=model_info.model_mode,
+            model=None,
+            mode=None,
             stream=True,
             request_overrides=overrides,
         )
@@ -317,11 +451,12 @@ class ImageGenerationService:
 
         async def _call_generate(call_target: int) -> List[str]:
             overrides = self._app_chat_request_overrides(call_target, enable_nsfw)
+            overrides["modeId"] = "fast"
             response = await GrokChatService().chat(
                 token=token,
                 message=prompt,
-                model=model_info.grok_model,
-                mode=model_info.model_mode,
+                model=None,
+                mode=None,
                 stream=True,
                 request_overrides=overrides,
             )
@@ -420,7 +555,12 @@ class ImageGenerationService:
                 n=call_target,
                 response_format=response_format,
             )
-            return await processor.process(upstream)
+            try:
+                return await processor.process(upstream)
+            except Exception as exc:
+                if rate_limited(exc):
+                    await token_mgr.mark_rate_limited(call_token)
+                raise
 
         tasks = []
         for i in range(calls_needed):
@@ -464,6 +604,7 @@ class ImageGenerationService:
                             token_mgr,
                             model_info.model_id,
                             recovery_tried,
+                            prefer_tags={"nsfw"} if enable_nsfw else None,
                         )
                         if not recovery_token:
                             break
@@ -546,12 +687,20 @@ class ImageGenerationService:
 
     @staticmethod
     def _select_images(images: List[str], n: int) -> List[str]:
-        if len(images) >= n:
-            return images[:n]
-        selected = images.copy()
+        ordered = sorted(images, key=ImageGenerationService._image_result_rank)
+        if len(ordered) >= n:
+            return ordered[:n]
+        selected = ordered.copy()
         while len(selected) < n:
             selected.append("error")
         return selected
+
+    @staticmethod
+    def _image_result_rank(url: str) -> tuple[int, int, int]:
+        lower = str(url).lower()
+        is_partial = bool(re.search(r"(^|[-_/])part[-_/]?\d+($|[./?_#-])", lower))
+        is_preview = any(marker in lower for marker in ("thumbnail", "thumb", "preview"))
+        return (1 if is_partial else 0, 1 if is_preview else 0, len(lower))
 
 
 class ImageWSBaseProcessor(BaseProcessor):

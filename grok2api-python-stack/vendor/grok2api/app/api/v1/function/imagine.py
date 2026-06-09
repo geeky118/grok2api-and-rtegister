@@ -23,6 +23,11 @@ from app.services.token.manager import get_token_manager
 router = APIRouter()
 
 IMAGINE_SESSION_TTL = 600
+IMAGINE_RETRY_BASE_SECONDS = 15
+IMAGINE_RETRY_MAX_SECONDS = 90
+IMAGINE_SUCCESS_INTERVAL_SECONDS = 8
+IMAGINE_MAX_CONSECUTIVE_FAILURES = 5
+IMAGINE_MODEL_ID = "grok-imagine-1.0-fast"
 _IMAGINE_SESSIONS: dict[str, dict] = {}
 _IMAGINE_SESSIONS_LOCK = asyncio.Lock()
 
@@ -63,6 +68,13 @@ def _parse_sse_chunk(chunk: str) -> Optional[Dict[str, Any]]:
     if event and isinstance(payload, dict) and "type" not in payload:
         payload["type"] = event
     return payload
+
+
+def _imagine_retry_delay(consecutive_failures: int) -> float:
+    return min(
+        IMAGINE_RETRY_MAX_SECONDS,
+        IMAGINE_RETRY_BASE_SECONDS * max(1, consecutive_failures),
+    )
 
 
 async def _new_session(prompt: str, aspect_ratio: str, nsfw: Optional[bool]) -> str:
@@ -155,13 +167,15 @@ async def function_imagine_ws(websocket: WebSocket):
             run_task.cancel()
             try:
                 await run_task
+            except asyncio.CancelledError:
+                pass
             except Exception:
                 pass
         run_task = None
         stop_event.clear()
 
     async def _run(prompt: str, aspect_ratio: str, nsfw: Optional[bool]):
-        model_id = "grok-imagine-1.0"
+        model_id = IMAGINE_MODEL_ID
         model_info = ModelService.get(model_id)
         if not model_info or not model_info.is_image:
             await _send(
@@ -201,12 +215,14 @@ async def function_imagine_ws(websocket: WebSocket):
                 if not token:
                     await _send(
                         {
-                            "type": "error",
+                            "type": "status",
+                            "status": "retrying",
                             "message": "No available tokens. Please try again later.",
                             "code": "rate_limit_exceeded",
+                            "run_id": run_id,
                         }
                     )
-                    await asyncio.sleep(2)
+                    await asyncio.sleep(IMAGINE_RETRY_MAX_SECONDS)
                     continue
 
                 result = await ImageGenerationService().generate(
@@ -243,7 +259,7 @@ async def function_imagine_ws(websocket: WebSocket):
                                     "run_id": run_id,
                                 }
                             )
-                        await asyncio.sleep(2)
+                        await asyncio.sleep(IMAGINE_SUCCESS_INTERVAL_SECONDS)
                     else:
                         raise RuntimeError("Image generation returned empty data.")
 
@@ -252,6 +268,17 @@ async def function_imagine_ws(websocket: WebSocket):
             except Exception as e:
                 consecutive_failures += 1
                 logger.warning(f"Imagine stream error: {e}")
+                if consecutive_failures >= IMAGINE_MAX_CONSECUTIVE_FAILURES:
+                    await _send(
+                        {
+                            "type": "error",
+                            "message": str(e),
+                            "code": "temporary_generation_error",
+                            "failures": consecutive_failures,
+                            "run_id": run_id,
+                        }
+                    )
+                    break
                 await _send(
                     {
                         "type": "status",
@@ -262,7 +289,7 @@ async def function_imagine_ws(websocket: WebSocket):
                         "run_id": run_id,
                     }
                 )
-                await asyncio.sleep(min(10, 1.5 * consecutive_failures))
+                await asyncio.sleep(_imagine_retry_delay(consecutive_failures))
 
         await _send({"type": "status", "status": "stopped", "run_id": run_id})
 
@@ -373,7 +400,7 @@ async def function_imagine_sse(
 
     async def event_stream():
         try:
-            model_id = "grok-imagine-1.0"
+            model_id = IMAGINE_MODEL_ID
             model_info = ModelService.get(model_id)
             if not model_info or not model_info.is_image:
                 yield (
@@ -410,9 +437,9 @@ async def function_imagine_sse(
 
                     if not token:
                         yield (
-                            f"data: {orjson.dumps({'type': 'error', 'message': 'No available tokens. Please try again later.', 'code': 'rate_limit_exceeded'}).decode()}\n\n"
+                            f"data: {orjson.dumps({'type': 'status', 'status': 'retrying', 'message': 'No available tokens. Please try again later.', 'code': 'rate_limit_exceeded', 'run_id': run_id}).decode()}\n\n"
                         )
-                        await asyncio.sleep(2)
+                        await asyncio.sleep(IMAGINE_RETRY_MAX_SECONDS)
                         continue
 
                     result = await ImageGenerationService().generate(
@@ -450,7 +477,7 @@ async def function_imagine_sse(
                                     "run_id": run_id,
                                 }
                                 yield f"data: {orjson.dumps(payload).decode()}\n\n"
-                            await asyncio.sleep(2)
+                            await asyncio.sleep(IMAGINE_SUCCESS_INTERVAL_SECONDS)
                         else:
                             raise RuntimeError("Image generation returned empty data.")
                 except asyncio.CancelledError:
@@ -458,10 +485,15 @@ async def function_imagine_sse(
                 except Exception as e:
                     consecutive_failures += 1
                     logger.warning(f"Imagine SSE error: {e}")
+                    if consecutive_failures >= IMAGINE_MAX_CONSECUTIVE_FAILURES:
+                        yield (
+                            f"data: {orjson.dumps({'type': 'error', 'message': str(e), 'code': 'temporary_generation_error', 'failures': consecutive_failures, 'run_id': run_id}).decode()}\n\n"
+                        )
+                        break
                     yield (
                         f"data: {orjson.dumps({'type': 'status', 'status': 'retrying', 'message': str(e), 'code': 'temporary_generation_error', 'failures': consecutive_failures, 'run_id': run_id}).decode()}\n\n"
                     )
-                    await asyncio.sleep(min(10, 1.5 * consecutive_failures))
+                    await asyncio.sleep(_imagine_retry_delay(consecutive_failures))
 
             yield (
                 f"data: {orjson.dumps({'type': 'status', 'status': 'stopped', 'run_id': run_id}).decode()}\n\n"

@@ -168,6 +168,10 @@ nsfw = true
 medium_min_bytes = 30000
 # 判定为最终图的最小字节数
 final_min_bytes = 100000
+# 判定为最终图的最短边像素，避免较大的模糊中间态被返回
+final_min_edge = 384
+# 判定为最终图的最小总像素
+final_min_pixels = 250000
 # 遇到疑似审查/拦截时的并行补偿生成次数
 blocked_parallel_attempts = 5
 # 是否启用并行补偿（启用时优先使用不同 token）
@@ -230,11 +234,17 @@ delete_batch_size = 50
 # ==================== NSFW ====================
 [nsfw]
 # NSFW 批量开启并发上限
-concurrent = 60
+concurrent = 1
 # NSFW 批量开启批次大小
-batch_size = 30
+batch_size = 1
 # NSFW 请求超时时间（秒）
 timeout = 60
+# NSFW 单个账号处理后的间隔（秒）
+interval_seconds = 10
+# NSFW 遇到 429 时的外层重试次数
+retry_429_attempts = 3
+# NSFW 遇到 429 时的基础等待时间（秒）
+retry_429_delay_seconds = 20
 
 # ==================== 用量配置 ====================
 [usage]

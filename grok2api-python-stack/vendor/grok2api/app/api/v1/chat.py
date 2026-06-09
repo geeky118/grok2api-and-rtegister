@@ -18,7 +18,7 @@ from app.services.grok.services.image import ImageGenerationService
 from app.services.grok.services.image_edit import ImageEditService
 from app.services.grok.services.model import ModelService
 from app.services.grok.services.video import VideoService
-from app.services.grok.utils.response import make_chat_response
+from app.services.grok.utils.response import make_chat_response, wrap_image_content
 from app.services.token import get_token_manager
 from app.core.config import get_config
 from app.core.exceptions import ValidationException, AppException, ErrorType
@@ -191,8 +191,8 @@ def _imagine_fast_server_image_config() -> ImageConfig:
     n = int(get_config("imagine_fast.n", 1) or 1)
     size = str(get_config("imagine_fast.size", "1024x1024") or "1024x1024")
     response_format = str(
-        get_config("imagine_fast.response_format", get_config("app.image_format") or "url")
-        or "url"
+        get_config("imagine_fast.response_format", "b64_json")
+        or "b64_json"
     )
     return ImageConfig(n=n, size=size, response_format=response_format)
 
@@ -828,6 +828,8 @@ async def chat_completions(request: ChatCompletionRequest):
             )
 
         content = result.data[0] if result.data else ""
+        if content:
+            content = wrap_image_content(content, response_format)
         usage = result.usage_override
         return JSONResponse(
             content=make_chat_response(request.model, content, usage=usage)

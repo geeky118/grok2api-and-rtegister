@@ -45,12 +45,174 @@ class ImageEditResult:
     data: Union[AsyncGenerator[str, None], List[str]]
 
 
+def _normalize_grok_image_url(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if not value:
+        return None
+    lower = value.lower()
+    if lower.startswith("data:image/"):
+        return value
+    if lower.startswith("http://") or lower.startswith("https://"):
+        if any(
+            part in lower
+            for part in (
+                "assets.grok.com",
+                "imgen",
+                "image",
+                "img",
+                ".png",
+                ".jpg",
+                ".jpeg",
+                ".webp",
+                ".gif",
+            )
+        ):
+            return value
+        return None
+    if value.startswith("/"):
+        return f"https://assets.grok.com{value}"
+    if "/" in value and any(
+        part in lower
+        for part in (
+            "generated",
+            "image",
+            "assets",
+            "grok",
+            "file-attachments",
+            "image-attachments",
+        )
+    ):
+        return f"https://assets.grok.com/{value.lstrip('/')}"
+    return None
+
+
+def _walk_image_urls(value: Any) -> List[str]:
+    urls: List[str] = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            key_lower = str(key).lower()
+            if any(
+                part in key_lower
+                for part in (
+                    "url",
+                    "uri",
+                    "path",
+                    "original",
+                    "thumbnail",
+                    "image",
+                    "asset",
+                    "file",
+                )
+            ):
+                url = _normalize_grok_image_url(item)
+                if url:
+                    urls.append(url)
+                    continue
+            urls.extend(_walk_image_urls(item))
+    elif isinstance(value, list):
+        for item in value:
+            urls.extend(_walk_image_urls(item))
+    elif isinstance(value, str):
+        for match in re.finditer(r"!\[[^\]]*\]\(([^)]+)\)", value):
+            url = _normalize_grok_image_url(match.group(1).strip())
+            if url:
+                urls.append(url)
+        for match in re.finditer(r"https?://[^\s\"')<>]+", value):
+            candidate = match.group(0).rstrip(".,;")
+            lower = candidate.lower()
+            if any(part in lower for part in ("image", "img", "grok", "asset", ".png", ".jpg", ".jpeg", ".webp")):
+                url = _normalize_grok_image_url(candidate)
+                if url:
+                    urls.append(url)
+        for match in re.finditer(
+            r"(?<![A-Za-z0-9_/-])(?:generated|image|images|assets|file-attachments|image-attachments)/[^\s\"')<>]+",
+            value,
+            re.IGNORECASE,
+        ):
+            url = _normalize_grok_image_url(match.group(0).rstrip(".,;"))
+            if url:
+                urls.append(url)
+    return urls
+
+
+def _card_attachment_image_urls(card_attachment: Any) -> List[str]:
+    if not isinstance(card_attachment, dict):
+        return []
+    raw = card_attachment.get("jsonData") or card_attachment.get("json_data") or "{}"
+    try:
+        if isinstance(raw, str):
+            payload = orjson.loads(raw)
+        elif isinstance(raw, (bytes, bytearray)):
+            payload = orjson.loads(raw)
+        elif isinstance(raw, dict):
+            payload = raw
+        else:
+            payload = {}
+    except Exception as exc:
+        logger.debug(f"Failed to parse cardAttachment jsonData: {exc}")
+        payload = {}
+
+    urls: List[str] = []
+    card_type = payload.get("type", "") if isinstance(payload, dict) else ""
+    if card_type in ("render_generated_image", "render_edited_image"):
+        chunk = payload.get("image_chunk") if isinstance(payload, dict) else None
+        if isinstance(chunk, dict):
+            progress = chunk.get("progress")
+            if progress is None or float(progress or 0) >= 100:
+                urls.extend(_walk_image_urls(chunk))
+    elif card_type == "render_searched_image":
+        image = payload.get("image") if isinstance(payload, dict) else None
+        urls.extend(_walk_image_urls(image))
+
+    if not urls:
+        urls.extend(_walk_image_urls(payload))
+
+    seen = set()
+    result: List[str] = []
+    for url in urls:
+        if url in seen:
+            continue
+        seen.add(url)
+        result.append(url)
+    return _prefer_final_image_urls(result)
+
+
+def _response_image_urls(value: Any) -> List[str]:
+    urls = []
+    urls.extend(_collect_images(value))
+    urls.extend(_walk_image_urls(value))
+
+    seen = set()
+    result: List[str] = []
+    for url in urls:
+        if url in seen:
+            continue
+        seen.add(url)
+        result.append(url)
+    return _prefer_final_image_urls(result)
+
+
+def _prefer_final_image_urls(urls: List[str]) -> List[str]:
+    def score(url: str) -> tuple[int, int, int]:
+        lower = url.lower()
+        is_partial = bool(re.search(r"(^|[-_/])part[-_/]?\d+($|[./?_#-])", lower))
+        is_preview = any(marker in lower for marker in ("thumbnail", "thumb", "preview"))
+        return (1 if is_partial else 0, 1 if is_preview else 0, len(url))
+
+    return sorted(urls, key=score)
+
+
 class ImageEditService:
     """Image edit orchestration service."""
 
     @staticmethod
     def _build_request_overrides(n: int) -> Dict[str, Any]:
-        return {"imageGenerationCount": max(1, int(n or 1))}
+        return {
+            "imageGenerationCount": max(1, int(n or 1)),
+            "enableNsfw": bool(get_config("image.nsfw")),
+        }
 
     async def edit(
         self,
@@ -361,41 +523,33 @@ class ImageStreamProcessor(BaseProcessor):
                 # Handle cardAttachment-based image generation (new Grok format)
                 if ca := resp.get("cardAttachment"):
                     try:
-                        jd = orjson.loads(ca.get("jsonData", b"{}"))
-                        card_type = jd.get("type", "")
-                        url = None
-                        if card_type in ("render_generated_image", "render_edited_image"):
-                            chunk = jd.get("image_chunk", {})
-                            if chunk.get("progress", 0) >= 100 and chunk.get("imageUrl"):
-                                url = f"https://assets.grok.com/{chunk['imageUrl']}"
-                        elif card_type == "render_searched_image":
-                            img = jd.get("image", {})
-                            url = img.get("original") or img.get("thumbnail")
-                        if url:
-                                if self.response_format == "url":
+                        for url in _card_attachment_image_urls(ca):
+                            if url in final_images:
+                                continue
+                            if self.response_format == "url":
+                                processed = await self.process_url(url, "image")
+                                if processed:
+                                    final_images.append(processed)
+                            else:
+                                try:
+                                    dl_service = self._get_dl()
+                                    base64_data = await dl_service.parse_b64(
+                                        url, self.token, "image"
+                                    )
+                                    if base64_data:
+                                        b64 = base64_data.split(",", 1)[1] if "," in base64_data else base64_data
+                                        final_images.append(b64)
+                                except Exception as e:
+                                    logger.warning(f"Failed to convert stream card image to base64: {e}")
                                     processed = await self.process_url(url, "image")
                                     if processed:
                                         final_images.append(processed)
-                                else:
-                                    try:
-                                        dl_service = self._get_dl()
-                                        base64_data = await dl_service.parse_b64(
-                                            url, self.token, "image"
-                                        )
-                                        if base64_data:
-                                            b64 = base64_data.split(",", 1)[1] if "," in base64_data else base64_data
-                                            final_images.append(b64)
-                                    except Exception as e:
-                                        logger.warning(f"Failed to convert stream card image to base64: {e}")
-                                        processed = await self.process_url(url, "image")
-                                        if processed:
-                                            final_images.append(processed)
-                    except Exception:
-                        pass
+                    except Exception as card_err:
+                        logger.warning(f"cardAttachment stream processing error: {card_err}")
 
                 # modelResponse (legacy format)
                 if mr := resp.get("modelResponse"):
-                    if urls := _collect_images(mr):
+                    if urls := _response_image_urls(mr):
                         for url in urls:
                             if self.response_format == "url":
                                 processed = await self.process_url(url, "image")
@@ -420,7 +574,6 @@ class ImageStreamProcessor(BaseProcessor):
                                 processed = await self.process_url(url, "image")
                                 if processed:
                                     final_images.append(processed)
-                    continue
 
             for index, img_data in enumerate(final_images):
                 if self.n == 1:
@@ -540,55 +693,84 @@ class ImageCollectProcessor(BaseProcessor):
         """Process and collect images."""
         images = []
         idle_timeout = get_config("image.stream_timeout")
+        seen_resp_keys: set[str] = set()
+        seen_model_keys: set[str] = set()
+        seen_card_types: set[str] = set()
+        seen_model_image_shapes: set[str] = set()
+        seen_card_shapes: set[str] = set()
+        line_count = 0
 
         try:
             async for line in _with_idle_timeout(response, idle_timeout, self.model):
                 line = _normalize_line(line)
                 if not line:
                     continue
+                line_count += 1
                 try:
                     data = orjson.loads(line)
                 except orjson.JSONDecodeError:
                     continue
 
                 resp = data.get("result", {}).get("response", {})
+                if isinstance(resp, dict):
+                    seen_resp_keys.update(str(key) for key in resp.keys())
                 # Handle cardAttachment-based image generation/edit (new Grok format)
                 if ca := resp.get("cardAttachment"):
                     try:
-                        jd = orjson.loads(ca.get("jsonData", b"{}"))
-                        card_type = jd.get("type", "")
-                        url = None
-                        if card_type in ("render_generated_image", "render_edited_image"):
-                            chunk = jd.get("image_chunk", {})
-                            if chunk.get("progress", 0) >= 100 and chunk.get("imageUrl"):
-                                url = f"https://assets.grok.com/{chunk['imageUrl']}"
-                        elif card_type == "render_searched_image":
-                            img = jd.get("image", {})
-                            url = img.get("original") or img.get("thumbnail")
-                        if url:
-                                if self.response_format == "url":
+                        raw = ca.get("jsonData") if isinstance(ca, dict) else None
+                        if isinstance(raw, str) and raw.strip():
+                            try:
+                                payload = orjson.loads(raw)
+                                if isinstance(payload, dict) and payload.get("type"):
+                                    seen_card_types.add(str(payload.get("type")))
+                                    chunk = payload.get("image_chunk")
+                                    if isinstance(chunk, dict):
+                                        seen_card_shapes.add(
+                                            "chunk_keys="
+                                            f"{sorted(str(key) for key in chunk.keys())};"
+                                            f"progress={chunk.get('progress')}"
+                                        )
+                                    else:
+                                        seen_card_shapes.add(
+                                            f"payload_keys={sorted(str(key) for key in payload.keys())}"
+                                        )
+                            except Exception:
+                                pass
+                        for url in _card_attachment_image_urls(ca):
+                            if url in images:
+                                continue
+                            if self.response_format == "url":
+                                processed = await self.process_url(url, "image")
+                                if processed:
+                                    images.append(processed)
+                            else:
+                                try:
+                                    dl_service = self._get_dl()
+                                    base64_data = await dl_service.parse_b64(
+                                        url, self.token, "image"
+                                    )
+                                    if base64_data:
+                                        b64 = base64_data.split(",", 1)[1] if "," in base64_data else base64_data
+                                        images.append(b64)
+                                except Exception as e:
+                                    logger.warning(f"Failed to convert card image to base64: {e}")
                                     processed = await self.process_url(url, "image")
                                     if processed:
                                         images.append(processed)
-                                else:
-                                    try:
-                                        dl_service = self._get_dl()
-                                        base64_data = await dl_service.parse_b64(
-                                            url, self.token, "image"
-                                        )
-                                        if base64_data:
-                                            b64 = base64_data.split(",", 1)[1] if "," in base64_data else base64_data
-                                            images.append(b64)
-                                    except Exception as e:
-                                        logger.warning(f"Failed to convert card image to base64: {e}")
-                                        processed = await self.process_url(url, "image")
-                                        if processed:
-                                            images.append(processed)
                     except Exception as card_err:
                         logger.warning(f"cardAttachment processing error: {card_err}")
 
                 if mr := resp.get("modelResponse"):
-                    if urls := _collect_images(mr):
+                    if isinstance(mr, dict):
+                        seen_model_keys.update(str(key) for key in mr.keys())
+                        for key in ("generatedImageUrls", "imageEditUris", "imageAttachments", "fileUris"):
+                            value = mr.get(key)
+                            if isinstance(value, list):
+                                item_types = sorted({type(item).__name__ for item in value[:5]})
+                                seen_model_image_shapes.add(f"{key}:list[{len(value)}]:{item_types}")
+                            elif value:
+                                seen_model_image_shapes.add(f"{key}:{type(value).__name__}")
+                    if urls := _response_image_urls(mr):
                         for url in urls:
                             if self.response_format == "url":
                                 processed = await self.process_url(url, "image")
@@ -631,7 +813,14 @@ class ImageCollectProcessor(BaseProcessor):
         finally:
             await self.close()
 
-        return images
+            if not images:
+                logger.warning(
+                    "Image collect returned no results: "
+                    f"lines={line_count} card_types={sorted(seen_card_types)} "
+                    f"model_image_shapes={sorted(seen_model_image_shapes)} "
+                    f"card_shapes={sorted(seen_card_shapes)}"
+                )
+            return images
 
 
 __all__ = ["ImageEditService", "ImageEditResult"]

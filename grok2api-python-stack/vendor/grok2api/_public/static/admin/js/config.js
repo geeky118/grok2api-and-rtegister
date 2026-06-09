@@ -201,9 +201,12 @@ const LOCALE_MAP = {
 
   "nsfw": {
     "label": "NSFW 配置",
-    "concurrent": { title: "并发上限", desc: "批量开启 NSFW 模式时的并发请求上限。推荐 10。" },
-    "batch_size": { title: "批次大小", desc: "批量开启 NSFW 模式的单批处理数量。推荐 50。" },
-    "timeout": { title: "请求超时", desc: "NSFW 开启相关请求的超时时间（秒）。推荐 60。" }
+    "concurrent": { title: "并发上限", desc: "批量开启 NSFW 模式时的并发请求上限。大陆服务器走共享代理时建议 1。" },
+    "batch_size": { title: "批次大小", desc: "批量开启 NSFW 模式的单批处理数量。大陆服务器走共享代理时建议 1。" },
+    "timeout": { title: "请求超时", desc: "NSFW 开启相关请求的超时时间（秒）。推荐 60。" },
+    "interval_seconds": { title: "账号间隔", desc: "单个账号 NSFW 步骤结束后的等待时间（秒）。推荐 10。" },
+    "retry_429_attempts": { title: "429 重试次数", desc: "遇到 Grok 限流 429 时的外层重试次数。推荐 3。" },
+    "retry_429_delay_seconds": { title: "429 等待时间", desc: "遇到 Grok 限流 429 时的基础等待时间（秒），每次重试会递增。推荐 20。" }
   },
 
 

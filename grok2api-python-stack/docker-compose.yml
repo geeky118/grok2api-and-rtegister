@@ -39,9 +39,6 @@ services:
     volumes:
       - ./runtime/grok2api/data:/app/data
       - ./runtime/grok2api/logs:/app/logs
-      - ./image_override.py:/app/app/services/grok/services/image.py:ro
-      - ./image_edit_override.py:/app/app/services/grok/services/image_edit.py:ro
-      - ./models_override.py:/app/app/services/token/models.py:ro
     restart: unless-stopped
     depends_on:
       - warp

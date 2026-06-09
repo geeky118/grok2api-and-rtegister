@@ -2,10 +2,10 @@
 Token 数据模型
 
 额度规则:
-- Basic 新号默认 80 配额
+- Basic 新号默认 25 配额 (对话)
 - Super 新号默认 140 配额
 - 重置后恢复默认值
-- lowEffort 扣 1，highEffort 扣 4
+- lowEffort 扣 1，highEffort 扣 8
 """
 
 from enum import Enum
@@ -15,7 +15,7 @@ from datetime import datetime
 
 
 # 默认配额
-BASIC__DEFAULT_QUOTA = 80
+BASIC__DEFAULT_QUOTA = 25
 SUPER_DEFAULT_QUOTA = 140
 
 # 失败阈值
@@ -35,12 +35,12 @@ class EffortType(str, Enum):
     """请求消耗类型"""
 
     LOW = "low"  # 扣 1
-    HIGH = "high"  # 扣 4
+    HIGH = "high"  # 扣 8
 
 
 EFFORT_COST = {
     EffortType.LOW: 1,
-    EffortType.HIGH: 4,
+    EffortType.HIGH: 8,
 }
 
 
@@ -135,7 +135,7 @@ class TokenInfo(BaseModel):
         消耗配额（默认：扣减 quota）
 
         Args:
-            effort: LOW 计 1 次，HIGH 计 4 次
+            effort: LOW 计 1 次，HIGH 计 8 次
 
         Returns:
             实际扣除的配额
@@ -165,7 +165,7 @@ class TokenInfo(BaseModel):
         仅在 consumed_mode_enabled=true 时使用
 
         Args:
-            effort: LOW 计 1 次，HIGH 计 4 次
+            effort: LOW 计 1 次，HIGH 计 8 次
 
         Returns:
             实际计入的消耗次数
