@@ -2,38 +2,38 @@
 
 ## Goal
 
-[TODO]
+<Outcome that must be true when this task is done.>
 
 ## Context
 
-- [TODO]
+- <Relevant files, docs, commands, and prior decisions.>
 
 ## Constraints
 
-- [TODO]
+- <Performance, compatibility, rollout, safety, or business constraints.>
 
 ## Approach
 
-[TODO]
+<Implementation strategy and why it is appropriate.>
 
 ## Steps
 
-1. [TODO]
-2. [TODO]
-3. [TODO]
+1. <Concrete step with expected artifact.>
+2. <Concrete step with expected artifact.>
+3. <Concrete step with expected artifact.>
 
 ## Validation
 
-- [TODO]
+- <Commands, manual checks, screenshots, fixture runs, or smoke tests.>
 
 ## Decisions
 
-- [TODO]
+- <Decision made during execution and why.>
 
 ## Risks
 
-- [TODO]
+- <Known risk and mitigation.>
 
 ## Open Questions
 
-- [TODO]
+- <Unresolved question that may block or change the plan.>
